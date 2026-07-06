@@ -1,0 +1,14 @@
+.env
+*.log
+*.err
+*.zip
+login-page-preview*.png
+__pycache__/
+*.py[cod]
+node_modules/
+dist/
+storage/
+.vite/
+.pytest_cache/
+.coverage
+.DS_Store

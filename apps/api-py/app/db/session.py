@@ -1,0 +1,29 @@
+from collections.abc import Generator
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+from app.core.config import settings
+
+
+engine = create_engine(
+    settings.sqlalchemy_url,
+    connect_args={"options": f"-csearch_path={settings.pg_schema}"},
+    pool_pre_ping=True,
+)
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def get_db() -> Generator[Session, None, None]:
+    db = SessionLocal()
+    try:
+        db.execute(text(f"set search_path to {settings.pg_schema}"))
+        yield db
+    finally:
+        db.close()
+
