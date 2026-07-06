@@ -20,6 +20,8 @@ from app.db.models import (
     QualityIssue,
     ReportChapter,
     ReviewTask,
+    TaskEvent,
+    WorkbenchEvent,
     WorkItem,
 )
 from app.services.workbench import (
@@ -30,7 +32,9 @@ from app.services.workbench import (
     is_management_role,
     map_notification,
     map_review_task,
+    map_task_event,
     map_work_item,
+    map_workbench_event,
     visible_project_ids,
 )
 
@@ -435,6 +439,17 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             }
         )
 
+    event_stmt = select(WorkbenchEvent)
+    task_event_stmt = select(TaskEvent)
+    if project_ids:
+        event_stmt = event_stmt.where(WorkbenchEvent.project_id.in_(project_ids) | (WorkbenchEvent.project_id.is_(None)))
+        task_event_stmt = task_event_stmt.where(TaskEvent.project_id.in_(project_ids) | (TaskEvent.project_id.is_(None)))
+    elif visibility is not None:
+        event_stmt = event_stmt.where(WorkbenchEvent.project_id.in_(project_ids))
+        task_event_stmt = task_event_stmt.where(TaskEvent.project_id.in_(project_ids))
+    latest_events = [map_workbench_event(item) for item in db.scalars(event_stmt.order_by(WorkbenchEvent.created_at.desc()).limit(20)).all()]
+    task_events = [map_task_event(item) for item in db.scalars(task_event_stmt.order_by(TaskEvent.created_at.desc()).limit(30)).all()]
+
     activity_project_filter = list(project_by_id)
     activity_query = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(12)
     recent_logs = db.scalars(activity_query).all()
@@ -463,6 +478,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         "reviewQueue": review_queue[:12],
         "tasks": tasks,
         "notifications": notifications[:12],
+        "latestEvents": latest_events,
+        "taskEvents": task_events,
         "recentActivities": recent_activities,
         "quickActions": [
             {"key": "upload", "label": "上传项目资料", "description": "补充资料并进入解析", "route": "/documents"},
@@ -477,5 +494,9 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             "taskCancelRetry": True,
             "stuckDetection": True,
             "projectMemberFilter": True,
+            "workItemComments": True,
+            "reviewCountersign": True,
+            "notificationBatchRead": True,
+            "taskStageEvents": True,
         },
     }

@@ -18,6 +18,8 @@ from app.db.models import (
     QualityIssue,
     ReportChapter,
     ReviewTask,
+    TaskEvent,
+    WorkbenchEvent,
     WorkItem,
 )
 
@@ -368,4 +370,90 @@ def map_notification(note: Notification) -> dict[str, Any]:
         "sourceType": note.source_type,
         "sourceId": note.source_id,
         "createdAt": note.created_at.isoformat() if note.created_at else None,
+    }
+
+
+
+def add_workbench_event(
+    db: Session,
+    *,
+    project_id: str | None,
+    target_type: str,
+    target_id: str,
+    action: str,
+    actor: dict[str, Any],
+    comment: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> WorkbenchEvent:
+    event = WorkbenchEvent(
+        id=_new_id("WE"),
+        project_id=project_id,
+        target_type=target_type,
+        target_id=target_id,
+        action=action,
+        actor_id=actor.get("id"),
+        actor_name=actor.get("name") or actor.get("id") or "system",
+        comment=comment,
+        payload=payload or {},
+    )
+    db.add(event)
+    return event
+
+
+def add_task_event(
+    db: Session,
+    *,
+    project_id: str | None,
+    task_kind: str,
+    task_id: str,
+    status: str,
+    stage: str,
+    message: str,
+    actor: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> TaskEvent:
+    event = TaskEvent(
+        id=_new_id("TE"),
+        project_id=project_id,
+        task_kind=task_kind,
+        task_id=task_id,
+        status=status,
+        stage=stage,
+        message=message,
+        actor_id=actor.get("id") if actor else None,
+        actor_name=actor.get("name") if actor else None,
+        payload=payload or {},
+    )
+    db.add(event)
+    return event
+
+
+def map_workbench_event(event: WorkbenchEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "projectId": event.project_id,
+        "targetType": event.target_type,
+        "targetId": event.target_id,
+        "action": event.action,
+        "actorId": event.actor_id,
+        "actorName": event.actor_name,
+        "comment": event.comment,
+        "payload": event.payload or {},
+        "createdAt": event.created_at.isoformat() if event.created_at else None,
+    }
+
+
+def map_task_event(event: TaskEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "projectId": event.project_id,
+        "taskKind": event.task_kind,
+        "taskId": event.task_id,
+        "status": event.status,
+        "stage": event.stage,
+        "message": event.message,
+        "actorId": event.actor_id,
+        "actorName": event.actor_name,
+        "payload": event.payload or {},
+        "createdAt": event.created_at.isoformat() if event.created_at else None,
     }

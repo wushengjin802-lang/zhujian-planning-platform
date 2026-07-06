@@ -32,6 +32,8 @@ from app.db.models import (
     Notification,
     ProjectMember,
     ReviewTask,
+    TaskEvent,
+    WorkbenchEvent,
     WorkItem,
 )
 from app.db.session import get_db
@@ -39,17 +41,17 @@ from app.services.artifacts import generate_artifact
 from app.services.auth import authenticate_user, get_session_user, logout_session
 from app.services.capabilities import platform_status
 from app.services.dashboard import build_dashboard
-from app.services.workbench import assert_project_visible
+from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, map_task_event, map_workbench_event
 from app.services.documents import parse_document
 from app.services.estimates import calculate_estimate, confirm_estimate, get_estimate, map_estimate
-from app.services.jobs import enqueue_or_run
+from app.services.jobs import enqueue_or_run, revoke_task
 from app.services.model_gateway import gateway_status, generate_text
 from app.services.quality import run_quality_check
 from app.services.rag import generate_chapter_with_rag
 from app.services.storage import persist_upload, storage
 from app.worker.tasks import export_artifact_task, parse_document_task, quality_check_task
 
-app = FastAPI(title="住建项目策划平台 API", version="0.1.0")
+app = FastAPI(title="住建项目策划平台 API", version="1.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -115,6 +117,15 @@ class WorkItemAction(BaseModel):
 
 class ReviewAction(BaseModel):
     comment: str | None = None
+    reviewerId: str | None = None
+
+
+class CommentAction(BaseModel):
+    comment: str
+
+
+class NotificationBatchAction(BaseModel):
+    projectId: str | None = None
 
 
 class TaskAction(BaseModel):
@@ -171,6 +182,181 @@ def dashboard(projectId: str | None = None, db: Session = Depends(get_db), user:
 
 
 
+@app.get("/api/work-items/{item_id}/events")
+def list_work_item_events(item_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> list[dict]:
+    item = db.get(WorkItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Work item not found")
+    try:
+        assert_project_visible(db, user, item.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    rows = db.scalars(select(WorkbenchEvent).where(WorkbenchEvent.target_type == "work_item", WorkbenchEvent.target_id == item_id).order_by(WorkbenchEvent.created_at.desc(), WorkbenchEvent.id.desc())).all()
+    return [map_workbench_event(row) for row in rows]
+
+
+@app.post("/api/work-items/{item_id}/comments")
+def comment_work_item(item_id: str, payload: CommentAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    item = db.get(WorkItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Work item not found")
+    try:
+        assert_project_visible(db, user, item.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not payload.comment.strip():
+        raise HTTPException(status_code=400, detail="comment is required")
+    event = add_workbench_event(db, project_id=item.project_id, target_type="work_item", target_id=item.id, action="comment", actor=user, comment=payload.comment.strip())
+    item.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "comment_work_item", "work_item", item_id, {"comment": payload.comment.strip()})
+    db.commit()
+    return map_workbench_event(event)
+
+
+@app.post("/api/work-items/{item_id}/cancel")
+def cancel_work_item(item_id: str, payload: WorkItemAction | None = None, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    item = db.get(WorkItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Work item not found")
+    try:
+        assert_project_visible(db, user, item.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if item.status == "已完成":
+        raise HTTPException(status_code=409, detail="Completed work item cannot be cancelled")
+    item.status = "已取消"
+    item.updated_at = datetime.now(timezone.utc)
+    comment = payload.comment if payload else None
+    add_workbench_event(db, project_id=item.project_id, target_type="work_item", target_id=item.id, action="cancel", actor=user, comment=comment)
+    write_audit(db, user["name"], "cancel_work_item", "work_item", item_id, {"comment": comment})
+    db.commit()
+    return {"id": item.id, "status": item.status}
+
+
+@app.get("/api/review-tasks/{task_id}/events")
+def list_review_task_events(task_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> list[dict]:
+    task = db.get(ReviewTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Review task not found")
+    try:
+        assert_project_visible(db, user, task.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    rows = db.scalars(select(WorkbenchEvent).where(WorkbenchEvent.target_type == "review_task", WorkbenchEvent.target_id == task_id).order_by(WorkbenchEvent.created_at.desc(), WorkbenchEvent.id.desc())).all()
+    return [map_workbench_event(row) for row in rows]
+
+
+@app.post("/api/review-tasks/{task_id}/comments")
+def comment_review_task(task_id: str, payload: CommentAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    task = db.get(ReviewTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Review task not found")
+    try:
+        assert_project_visible(db, user, task.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not payload.comment.strip():
+        raise HTTPException(status_code=400, detail="comment is required")
+    event = add_workbench_event(db, project_id=task.project_id, target_type="review_task", target_id=task.id, action="comment", actor=user, comment=payload.comment.strip())
+    task.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "comment_review_task", "review_task", task_id, {"comment": payload.comment.strip()})
+    db.commit()
+    return map_workbench_event(event)
+
+
+@app.post("/api/review-tasks/{task_id}/assign")
+def assign_review_task(task_id: str, payload: ReviewAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    if not payload.reviewerId:
+        raise HTTPException(status_code=400, detail="reviewerId is required")
+    task = db.get(ReviewTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Review task not found")
+    try:
+        assert_project_visible(db, user, task.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    reviewer = db.get(AppUser, payload.reviewerId)
+    if not reviewer or reviewer.status != "启用":
+        raise HTTPException(status_code=404, detail="Reviewer not found or disabled")
+    task.reviewer_id = reviewer.id
+    task.status = "审核中"
+    task.updated_at = datetime.now(timezone.utc)
+    add_workbench_event(db, project_id=task.project_id, target_type="review_task", target_id=task.id, action="assign", actor=user, comment=payload.comment, payload={"reviewerId": reviewer.id, "reviewerName": reviewer.name})
+    db.add(Notification(id=f"NT-{int(time.time() * 1000)}", user_id=reviewer.id, project_id=task.project_id, level="info", title=f"审核任务分配：{task.title}", message=payload.comment or "请及时处理该审核任务。", route=task.route, source_type="review_task", source_id=task.id, status="未读"))
+    write_audit(db, user["name"], "assign_review_task", "review_task", task_id, {"reviewerId": reviewer.id, "comment": payload.comment})
+    db.commit()
+    return {"id": task.id, "status": task.status, "reviewerId": task.reviewer_id}
+
+
+@app.post("/api/review-tasks/{task_id}/countersign")
+def countersign_review_task(task_id: str, payload: ReviewAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    task = db.get(ReviewTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Review task not found")
+    try:
+        assert_project_visible(db, user, task.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    comment = payload.comment or "同意当前审核意见。"
+    event = add_workbench_event(db, project_id=task.project_id, target_type="review_task", target_id=task.id, action="countersign", actor=user, comment=comment)
+    task.status = "审核中"
+    task.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "countersign_review_task", "review_task", task_id, {"comment": comment})
+    db.commit()
+    return map_workbench_event(event)
+
+
+@app.post("/api/notifications/read-all")
+def mark_notifications_read_all(payload: NotificationBatchAction | None = None, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    stmt = select(Notification).where(Notification.status == "未读")
+    if payload and payload.projectId:
+        try:
+            assert_project_visible(db, user, payload.projectId)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        stmt = stmt.where(Notification.project_id == payload.projectId)
+    if not any(keyword in user.get("role", "") for keyword in ("管理员", "负责人", "领导", "审核", "经理")):
+        stmt = stmt.where((Notification.user_id.is_(None)) | (Notification.user_id == user["id"]))
+    rows = db.scalars(stmt).all()
+    now = datetime.now(timezone.utc)
+    for note in rows:
+        note.status = "已读"
+        note.read_at = now
+        note.updated_at = now
+    write_audit(db, user["name"], "read_all_notifications", "notification", payload.projectId if payload else None, {"count": len(rows)})
+    db.commit()
+    return {"count": len(rows), "status": "已读"}
+
+
+@app.post("/api/notifications/{notification_id}/archive")
+def archive_notification(notification_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    note = db.get(Notification, notification_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    try:
+        assert_project_visible(db, user, note.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if note.user_id and note.user_id != user["id"]:
+        raise HTTPException(status_code=403, detail="Notification belongs to another user")
+    note.status = "已归档"
+    note.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "archive_notification", "notification", notification_id, {})
+    db.commit()
+    return {"id": note.id, "status": note.status}
+
+
+@app.get("/api/tasks/{task_id}/events")
+def list_task_events(task_id: str, taskKind: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> list[dict]:
+    rows = db.scalars(select(TaskEvent).where(TaskEvent.task_kind == taskKind, TaskEvent.task_id == task_id).order_by(TaskEvent.created_at.desc(), TaskEvent.id.desc())).all()
+    if rows:
+        try:
+            assert_project_visible(db, user, rows[0].project_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    return [map_task_event(row) for row in rows]
+
+
 @app.post("/api/work-items/{item_id}/claim")
 def claim_work_item(item_id: str, payload: WorkItemAction | None = None, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     item = db.get(WorkItem, item_id)
@@ -186,6 +372,7 @@ def claim_work_item(item_id: str, payload: WorkItemAction | None = None, db: Ses
     item.assignee_id = assignee_id
     item.status = "处理中"
     item.updated_at = datetime.now(timezone.utc)
+    add_workbench_event(db, project_id=item.project_id, target_type="work_item", target_id=item.id, action="claim", actor=user, comment=payload.comment if payload else None, payload={"assigneeId": assignee_id})
     write_audit(db, user["name"], "claim_work_item", "work_item", item_id, {"assigneeId": assignee_id})
     db.commit()
     return {"id": item.id, "status": item.status, "assigneeId": item.assignee_id}
@@ -206,6 +393,7 @@ def complete_work_item(item_id: str, payload: WorkItemAction | None = None, db: 
     item.assignee_id = item.assignee_id or user["id"]
     item.completed_at = datetime.now(timezone.utc)
     item.updated_at = item.completed_at
+    add_workbench_event(db, project_id=item.project_id, target_type="work_item", target_id=item.id, action="complete", actor=user, comment=payload.comment if payload else None)
     write_audit(db, user["name"], "complete_work_item", "work_item", item_id, {"comment": payload.comment if payload else None})
     db.commit()
     return {"id": item.id, "status": item.status}
@@ -228,6 +416,8 @@ def transfer_work_item(item_id: str, payload: WorkItemAction, db: Session = Depe
     item.assignee_id = payload.assigneeId
     item.status = "待处理"
     item.updated_at = datetime.now(timezone.utc)
+    add_workbench_event(db, project_id=item.project_id, target_type="work_item", target_id=item.id, action="transfer", actor=user, comment=payload.comment, payload={"assigneeId": payload.assigneeId})
+    db.add(Notification(id=f"NT-{int(time.time() * 1000)}", user_id=payload.assigneeId, project_id=item.project_id, level="info", title=f"工作项转交：{item.title}", message=payload.comment or "请及时处理该工作项。", route=item.route, source_type="work_item", source_id=item.id, status="未读"))
     write_audit(db, user["name"], "transfer_work_item", "work_item", item_id, {"assigneeId": payload.assigneeId, "comment": payload.comment})
     db.commit()
     return {"id": item.id, "status": item.status, "assigneeId": item.assignee_id}
@@ -248,6 +438,8 @@ def approve_review_task(task_id: str, payload: ReviewAction | None = None, db: S
     task.comment = payload.comment if payload else None
     task.decided_at = datetime.now(timezone.utc)
     task.updated_at = task.decided_at
+    add_workbench_event(db, project_id=task.project_id, target_type="review_task", target_id=task.id, action="approve", actor=user, comment=task.comment, payload={"targetType": task.target_type, "targetId": task.target_id})
+    add_workbench_event(db, project_id=task.project_id, target_type="review_task", target_id=task.id, action="reject", actor=user, comment=task.comment, payload={"targetType": task.target_type, "targetId": task.target_id})
     if task.target_type == "report_chapter":
         chapter = db.get(ReportChapter, task.target_id)
         if chapter:
@@ -327,6 +519,8 @@ def mark_notification_read(notification_id: str, db: Session = Depends(get_db), 
 @app.post("/api/tasks/{task_id}/cancel")
 def cancel_background_task(task_id: str, payload: TaskAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     now = datetime.now(timezone.utc)
+    task_project_id = None
+    revoke_result = revoke_task(task_id, terminate=False)
     if payload.taskKind == "parse":
         job = db.get(ParseJob, task_id)
         if not job:
@@ -339,6 +533,7 @@ def cancel_background_task(task_id: str, payload: TaskAction, db: Session = Depe
         job.status = "cancelled"
         job.message = "用户取消解析任务。"
         job.updated_at = now
+        task_project_id = document.project_id if document else None
         if document and document.parse_status != "已解析":
             document.parse_status = "需复核"
             document.updated_at = current_day(db)
@@ -350,6 +545,7 @@ def cancel_background_task(task_id: str, payload: TaskAction, db: Session = Depe
             assert_project_visible(db, user, job.project_id)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
+        task_project_id = job.project_id
         job.status = "cancelled"
         job.message = "用户取消质量检查任务。"
         job.updated_at = now
@@ -361,13 +557,15 @@ def cancel_background_task(task_id: str, payload: TaskAction, db: Session = Depe
             assert_project_visible(db, user, artifact.project_id)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
+        task_project_id = artifact.project_id
         artifact.status = "受阻"
         artifact.updated_at = current_day(db)
     else:
         raise HTTPException(status_code=400, detail="Unsupported taskKind")
-    write_audit(db, user["name"], "cancel_background_task", payload.taskKind, task_id, {})
+    add_task_event(db, project_id=task_project_id, task_kind=payload.taskKind, task_id=task_id, status="cancelled", stage="用户取消", message="已登记取消请求。", actor=user, payload=revoke_result)
+    write_audit(db, user["name"], "cancel_background_task", payload.taskKind, task_id, {"revoke": revoke_result})
     db.commit()
-    return {"id": task_id, "taskKind": payload.taskKind, "status": "cancelled"}
+    return {"id": task_id, "taskKind": payload.taskKind, "status": "cancelled", "revoke": revoke_result}
 
 
 @app.post("/api/tasks/{task_id}/retry", status_code=202)
@@ -389,6 +587,7 @@ def retry_background_task(task_id: str, payload: TaskAction, db: Session = Depen
         db.add(job)
         db.commit()
         result = enqueue_or_run(parse_document_task, (document.id, job.id), lambda: parse_document(db, document.id, job.id) or {"status": "not_found"})
+        add_task_event(db, project_id=document.project_id, task_kind="parse", task_id=job.id, status="queued", stage="重试提交", message=f"由 {task_id} 重试创建。", actor=user, payload={"retryOf": task_id, "execution": result.get("execution")})
         write_audit(db, user["name"], "retry_background_task", "parse", job.id, {"retryOf": task_id})
         db.commit()
         return {"id": job.id, "taskKind": "parse", "status": "queued", **result}
@@ -401,6 +600,7 @@ def retry_background_task(task_id: str, payload: TaskAction, db: Session = Depen
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
         result = enqueue_or_run(quality_check_task, (old_job.project_id,), lambda: run_quality_check(db, old_job.project_id))
+        add_task_event(db, project_id=old_job.project_id, task_kind="quality", task_id=result.get("taskId", task_id), status="queued", stage="重试提交", message="质量检查任务已重新提交。", actor=user, payload={"retryOf": task_id, "execution": result.get("execution")})
         write_audit(db, user["name"], "retry_background_task", "quality", task_id, {"projectId": old_job.project_id})
         db.commit()
         return {"id": result.get("taskId", task_id), "taskKind": "quality", "status": "queued", **result}
@@ -416,6 +616,7 @@ def retry_background_task(task_id: str, payload: TaskAction, db: Session = Depen
         artifact.updated_at = current_day(db)
         db.commit()
         result = enqueue_or_run(export_artifact_task, (artifact.id,), lambda: {"artifact": map_artifact(generate_artifact(db, artifact.id))})
+        add_task_event(db, project_id=artifact.project_id, task_kind="artifact", task_id=artifact.id, status="queued", stage="重试提交", message="成果导出任务已重新提交。", actor=user, payload={"retryOf": task_id, "execution": result.get("execution")})
         write_audit(db, user["name"], "retry_background_task", "artifact", task_id, {})
         db.commit()
         return {"id": artifact.id, "taskKind": "artifact", "status": "queued", **result}
@@ -637,13 +838,14 @@ def list_artifacts(project_id: str, db: Session = Depends(get_db)) -> list[dict]
 
 
 @app.post("/api/artifacts/{artifact_id}/export", status_code=202)
-def export_artifact(artifact_id: str, db: Session = Depends(get_db), _: dict = Depends(current_user)) -> dict:
+def export_artifact(artifact_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     artifact = db.get(Artifact, artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     artifact.status = "生成中"
     artifact.updated_at = current_day(db)
-    write_audit(db, "system", "queue_artifact_export", "artifact", artifact_id, {"format": artifact.format})
+    add_task_event(db, project_id=artifact.project_id, task_kind="artifact", task_id=artifact.id, status="queued", stage="提交导出", message="成果导出任务已提交。", actor=user, payload={"format": artifact.format})
+    write_audit(db, user["name"], "queue_artifact_export", "artifact", artifact_id, {"format": artifact.format})
     db.commit()
     result = enqueue_or_run(export_artifact_task, (artifact_id,), lambda: {"artifact": map_artifact(generate_artifact(db, artifact_id))})
     if result.get("execution") == "queued":
@@ -670,7 +872,7 @@ def create_parse_job(payload: ParseJobCreate, db: Session = Depends(get_db), _: 
 
 
 @app.post("/api/documents/{document_id}/parse", status_code=202)
-def run_parse(document_id: str, db: Session = Depends(get_db), _: dict = Depends(current_user)) -> dict:
+def run_parse(document_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     document = db.get(ProjectDocument, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -678,7 +880,8 @@ def run_parse(document_id: str, db: Session = Depends(get_db), _: dict = Depends
     document.parse_status = "解析中"
     document.updated_at = current_day(db)
     db.add(job)
-    write_audit(db, "system", "queue_document_parse", "project_document", document_id, {"jobId": job.id})
+    add_task_event(db, project_id=document.project_id, task_kind="parse", task_id=job.id, status="queued", stage="提交解析", message="资料解析任务已提交。", actor=user, payload={"documentId": document_id})
+    write_audit(db, user["name"], "queue_document_parse", "project_document", document_id, {"jobId": job.id})
     db.commit()
     result = enqueue_or_run(parse_document_task, (document_id, job.id), lambda: parse_document(db, document_id, job.id) or {"status": "not_found"})
     if result.get("execution") == "queued":
@@ -694,10 +897,11 @@ def run_parse(document_id: str, db: Session = Depends(get_db), _: dict = Depends
 
 
 @app.post("/api/quality/checks", status_code=202)
-def create_quality_check(payload: QualityCheckCreate, db: Session = Depends(get_db), _: dict = Depends(current_user)) -> dict:
+def create_quality_check(payload: QualityCheckCreate, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     if not payload.projectId:
         return run_quality_check(db, payload.projectId)
     result = enqueue_or_run(quality_check_task, (payload.projectId,), lambda: run_quality_check(db, payload.projectId))
+    add_task_event(db, project_id=payload.projectId, task_kind="quality", task_id=result.get("taskId", f"QC-{int(time.time() * 1000)}"), status="queued", stage="提交检查", message="质量检查任务已提交。", actor=user, payload={"execution": result.get("execution")})
     if result.get("execution") == "queued":
         return {"id": result["taskId"], "projectId": payload.projectId, "status": "queued", "message": "质量检查任务已进入后台处理。", **result}
     return result

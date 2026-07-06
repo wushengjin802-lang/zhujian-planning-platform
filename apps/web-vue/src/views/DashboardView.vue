@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import { ElMessageBox } from "element-plus";
 import { useRouter } from "vue-router";
 import {
   BellFilled,
@@ -25,6 +26,7 @@ const store = usePlatformStore();
 const router = useRouter();
 const activeWorkTab = ref<"todo" | "review">("todo");
 const taskFilter = ref("全部");
+const activeActivityTab = ref<"audit" | "event">("audit");
 
 const dashboard = computed(() => store.dashboard);
 const visibleTasks = computed(() => {
@@ -95,6 +97,49 @@ function openRoute(route: string, projectId?: string | null) {
     store.currentProjectId = projectId;
   }
   router.push(route);
+}
+
+async function promptComment(title: string, placeholder: string) {
+  const result = await ElMessageBox.prompt(placeholder, title, {
+    confirmButtonText: "提交",
+    cancelButtonText: "取消",
+    inputType: "textarea",
+    inputPlaceholder: placeholder
+  });
+  return result.value;
+}
+
+async function commentWorkItem(id: string) {
+  const comment = await promptComment("补充工作项意见", "请输入处理意见、问题说明或下一步安排");
+  await store.commentDashboardWorkItem(id, comment);
+}
+
+async function cancelWorkItem(id: string) {
+  const comment = await promptComment("取消工作项", "请输入取消原因");
+  await store.cancelDashboardWorkItem(id, comment);
+}
+
+async function commentReviewTask(id: string) {
+  const comment = await promptComment("补充审核意见", "请输入审核意见");
+  await store.commentDashboardReviewTask(id, comment);
+}
+
+async function countersignReviewTask(id: string) {
+  const comment = await promptComment("审核会签", "请输入会签意见");
+  await store.countersignDashboardReviewTask(id, comment);
+}
+
+async function assignReviewTask(id: string) {
+  const result = await ElMessageBox.prompt("请输入审核人用户ID，例如 U001", "分配审核人", {
+    confirmButtonText: "分配",
+    cancelButtonText: "取消",
+    inputPlaceholder: "审核人用户ID"
+  });
+  await store.assignDashboardReviewTask(id, result.value, "工作台分配审核人");
+}
+
+function taskEventsFor(row: { id: string; taskKind: string }) {
+  return (dashboard.value?.taskEvents ?? []).filter((item) => item.taskId === row.id && item.taskKind === row.taskKind).slice(0, 3);
 }
 
 onMounted(() => {
@@ -203,7 +248,10 @@ watch(
                 <h3>风险与提醒</h3>
                 <p>需要优先关注的流程事件</p>
               </div>
-              <el-icon class="header-icon"><BellFilled /></el-icon>
+              <div class="header-actions">
+                <el-button size="small" link type="primary" @click="store.readAllDashboardNotifications(store.dashboardScope === 'current' ? store.currentProject?.id : undefined)">全部已读</el-button>
+                <el-icon class="header-icon"><BellFilled /></el-icon>
+              </div>
             </div>
           </template>
 
@@ -224,12 +272,10 @@ watch(
               <strong>{{ notice.title }}</strong>
               <small>{{ notice.message }}</small>
             </span>
-            <el-button
-              v-if="notice.id !== 'all-clear' && notice.id !== 'stuck-tasks'"
-              link
-              type="primary"
-              @click.stop="store.readDashboardNotification(notice.id)"
-            >已读</el-button>
+            <span v-if="notice.id !== 'all-clear' && notice.id !== 'stuck-tasks'" class="notice-actions">
+              <el-button link type="primary" @click.stop="store.readDashboardNotification(notice.id)">已读</el-button>
+              <el-button link type="info" @click.stop="store.archiveDashboardNotification(notice.id)">归档</el-button>
+            </span>
             <el-icon><Right /></el-icon>
           </button>
         </el-card>
@@ -264,7 +310,9 @@ watch(
               <el-tag :type="statusType(item.status)" effect="plain" size="small">{{ item.status }}</el-tag>
               <span class="work-actions">
                 <el-button v-if="item.status !== '处理中'" link type="primary" @click.stop="store.claimDashboardWorkItem(item.id)">领取</el-button>
+                <el-button link type="info" @click.stop="commentWorkItem(item.id)">意见</el-button>
                 <el-button link type="success" @click.stop="store.completeDashboardWorkItem(item.id)">完成</el-button>
+                <el-button link type="warning" @click.stop="cancelWorkItem(item.id)">取消</el-button>
               </span>
               <el-icon><Right /></el-icon>
             </button>
@@ -287,8 +335,11 @@ watch(
               <span class="work-owner">{{ item.reviewerName || item.submitter }}</span>
               <el-tag type="warning" effect="plain" size="small">{{ item.status }}</el-tag>
               <span class="work-actions">
+                <el-button link type="primary" @click.stop="assignReviewTask(item.id)">分配</el-button>
+                <el-button link type="info" @click.stop="commentReviewTask(item.id)">意见</el-button>
                 <el-button link type="success" @click.stop="store.approveDashboardReviewTask(item.id)">通过</el-button>
                 <el-button link type="warning" @click.stop="store.rejectDashboardReviewTask(item.id)">退回</el-button>
+                <el-button link type="primary" @click.stop="countersignReviewTask(item.id)">会签</el-button>
               </span>
               <el-icon><Right /></el-icon>
             </button>
@@ -341,6 +392,15 @@ watch(
           </template>
 
           <el-table :data="visibleTasks" size="small" empty-text="暂无后台任务" max-height="320">
+            <el-table-column type="expand" width="38">
+              <template #default="{ row }">
+                <div class="task-event-list">
+                  <strong>阶段日志</strong>
+                  <p v-for="event in taskEventsFor(row)" :key="event.id">{{ formatTime(event.createdAt) }} · {{ event.stage }} · {{ event.message }}</p>
+                  <p v-if="!taskEventsFor(row).length">暂无阶段日志</p>
+                </div>
+              </template>
+            </el-table-column>
             <el-table-column label="任务" min-width="210">
               <template #default="{ row }">
                 <div class="task-name">
@@ -377,12 +437,15 @@ watch(
             <div class="dashboard-panel-title">
               <div>
                 <h3>近期活动</h3>
-                <p>项目关键操作与审计记录</p>
+                <p>审计记录与工作台处理留痕</p>
               </div>
-              <el-icon class="header-icon"><Memo /></el-icon>
+              <el-tabs v-model="activeActivityTab" class="activity-tabs">
+                <el-tab-pane label="审计" name="audit" />
+                <el-tab-pane label="事件" name="event" />
+              </el-tabs>
             </div>
           </template>
-          <el-timeline>
+          <el-timeline v-if="activeActivityTab === 'audit'">
             <el-timeline-item
               v-for="activity in dashboard.recentActivities.slice(0, 7)"
               :key="activity.id"
@@ -393,7 +456,19 @@ watch(
               <p>{{ activity.actor }} · {{ activity.entityType }} {{ activity.entityId ?? "" }}</p>
             </el-timeline-item>
           </el-timeline>
-          <el-empty v-if="!dashboard.recentActivities.length" description="暂无活动记录" :image-size="70" />
+          <el-timeline v-else>
+            <el-timeline-item
+              v-for="event in dashboard.latestEvents.slice(0, 7)"
+              :key="event.id"
+              :timestamp="formatTime(event.createdAt)"
+              placement="top"
+            >
+              <strong>{{ event.action }}</strong>
+              <p>{{ event.actorName }} · {{ event.comment || '无补充意见' }}</p>
+            </el-timeline-item>
+          </el-timeline>
+          <el-empty v-if="activeActivityTab === 'audit' && !dashboard.recentActivities.length" description="暂无活动记录" :image-size="70" />
+          <el-empty v-if="activeActivityTab === 'event' && !dashboard.latestEvents.length" description="暂无工作台事件" :image-size="70" />
         </el-card>
       </section>
 
@@ -599,6 +674,36 @@ watch(
   font-size: 22px;
 }
 
+.header-actions,
+.notice-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.activity-tabs :deep(.el-tabs__header) {
+  margin: 0;
+}
+
+.task-event-list {
+  margin: 4px 16px 8px 54px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #f7faf9;
+}
+
+.task-event-list strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #203746;
+}
+
+.task-event-list p {
+  margin: 3px 0;
+  color: #667985;
+  font-size: 12px;
+}
+
 .project-overview {
   display: flex;
   align-items: center;
@@ -713,7 +818,7 @@ watch(
 .work-row {
   display: grid;
   width: 100%;
-  grid-template-columns: 38px minmax(0, 1fr) 95px 82px 112px 18px;
+  grid-template-columns: 38px minmax(0, 1fr) 95px 82px 188px 18px;
   gap: 10px;
   align-items: center;
   padding: 12px 4px;

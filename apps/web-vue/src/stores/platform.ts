@@ -4,9 +4,14 @@ import { ElMessage } from "element-plus";
 import type { AppUser, BootstrapPayload, DashboardPayload, FactItem, InvestmentEstimate, PlatformStatus, ProjectDocument, QualityIssue, ReportChapter } from "../types";
 import {
   approveReviewTask,
+  archiveNotification,
+  assignReviewTask,
   calculateInvestmentEstimate,
   cancelBackgroundTask,
+  cancelWorkItem,
   claimWorkItem,
+  commentReviewTask,
+  commentWorkItem,
   completeWorkItem,
   confirmInvestmentEstimate,
   createDocument,
@@ -15,12 +20,17 @@ import {
   generateChapterDraft,
   getCurrentUser,
   loadBootstrap,
+  countersignReviewTask,
   loadDashboard,
   loadInvestmentEstimate,
+  loadReviewTaskEvents,
+  loadTaskEvents,
+  loadWorkItemEvents,
   loadPlatformStatus,
   login,
   logout,
   markNotificationRead,
+  markNotificationsReadAll,
   rejectReviewTask,
   requestArtifactExport,
   retryBackgroundTask,
@@ -257,6 +267,34 @@ export const usePlatformStore = defineStore("platform", () => {
     return runAction("重试任务", () => retryBackgroundTask(id, taskKind));
   }
 
+  function cancelDashboardWorkItem(id: string, comment?: string) {
+    return runAction("取消工作项", () => cancelWorkItem(id, comment));
+  }
+
+  function commentDashboardWorkItem(id: string, comment: string) {
+    return runAction("补充工作项意见", () => commentWorkItem(id, comment));
+  }
+
+  function commentDashboardReviewTask(id: string, comment: string) {
+    return runAction("补充审核意见", () => commentReviewTask(id, comment));
+  }
+
+  function countersignDashboardReviewTask(id: string, comment?: string) {
+    return runAction("审核会签", () => countersignReviewTask(id, comment));
+  }
+
+  function assignDashboardReviewTask(id: string, reviewerId: string, comment?: string) {
+    return runAction("分配审核人", () => assignReviewTask(id, reviewerId, comment));
+  }
+
+  function readAllDashboardNotifications(projectId?: string) {
+    return runAction("全部通知已读", () => markNotificationsReadAll(projectId));
+  }
+
+  function archiveDashboardNotification(id: string) {
+    return runAction("归档通知", () => archiveNotification(id));
+  }
+
   return {
     data,
     loading,
@@ -302,6 +340,16 @@ export const usePlatformStore = defineStore("platform", () => {
     rejectDashboardReviewTask,
     readDashboardNotification,
     cancelDashboardTask,
-    retryDashboardTask
+    retryDashboardTask,
+    cancelDashboardWorkItem,
+    commentDashboardWorkItem,
+    commentDashboardReviewTask,
+    countersignDashboardReviewTask,
+    assignDashboardReviewTask,
+    readAllDashboardNotifications,
+    archiveDashboardNotification,
+    loadWorkItemEvents,
+    loadReviewTaskEvents,
+    loadTaskEvents
   };
 });

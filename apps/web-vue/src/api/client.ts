@@ -1,4 +1,4 @@
-import type { AppUser, Artifact, BootstrapPayload, DashboardPayload, FactItem, InvestmentEstimate, PlatformStatus, Project, ProjectDocument, QualityIssue, ReportChapter } from "../types";
+import type { AppUser, Artifact, BootstrapPayload, DashboardPayload, FactItem, InvestmentEstimate, PlatformStatus, Project, ProjectDocument, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
 
 const tokenKey = "zhujian.sessionToken";
 
@@ -164,4 +164,63 @@ export function retryBackgroundTask(id: string, taskKind: "parse" | "quality" | 
     method: "POST",
     body: JSON.stringify({ taskKind })
   });
+}
+
+
+export function cancelWorkItem(id: string, comment?: string) {
+  return request<{ id: string; status: string }>(`/api/work-items/${id}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ comment })
+  });
+}
+
+export function commentWorkItem(id: string, comment: string) {
+  return request<WorkbenchEvent>(`/api/work-items/${id}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ comment })
+  });
+}
+
+export function loadWorkItemEvents(id: string) {
+  return request<WorkbenchEvent[]>(`/api/work-items/${id}/events`);
+}
+
+export function commentReviewTask(id: string, comment: string) {
+  return request<WorkbenchEvent>(`/api/review-tasks/${id}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ comment })
+  });
+}
+
+export function assignReviewTask(id: string, reviewerId: string, comment?: string) {
+  return request<{ id: string; status: string; reviewerId: string }>(`/api/review-tasks/${id}/assign`, {
+    method: "POST",
+    body: JSON.stringify({ reviewerId, comment })
+  });
+}
+
+export function countersignReviewTask(id: string, comment?: string) {
+  return request<WorkbenchEvent>(`/api/review-tasks/${id}/countersign`, {
+    method: "POST",
+    body: JSON.stringify({ comment })
+  });
+}
+
+export function loadReviewTaskEvents(id: string) {
+  return request<WorkbenchEvent[]>(`/api/review-tasks/${id}/events`);
+}
+
+export function markNotificationsReadAll(projectId?: string) {
+  return request<{ count: number; status: string }>("/api/notifications/read-all", {
+    method: "POST",
+    body: JSON.stringify({ projectId })
+  });
+}
+
+export function archiveNotification(id: string) {
+  return request<{ id: string; status: string }>(`/api/notifications/${id}/archive`, { method: "POST" });
+}
+
+export function loadTaskEvents(id: string, taskKind: "parse" | "quality" | "artifact") {
+  return request<TaskEvent[]>(`/api/tasks/${id}/events?taskKind=${encodeURIComponent(taskKind)}`);
 }

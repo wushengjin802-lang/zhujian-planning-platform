@@ -24,3 +24,16 @@ def enqueue_or_run(task: Any, args: tuple, fallback: Callable[[], dict]) -> dict
 def ensure_broker_available() -> None:
     if settings.celery_broker_url.startswith("redis://"):
         redis.Redis.from_url(settings.celery_broker_url, socket_connect_timeout=0.3, socket_timeout=0.3).ping()
+
+
+
+def revoke_task(task_id: str, *, terminate: bool = False) -> dict:
+    """Best-effort Celery revoke for visible task ids; never hides business-state cancellation."""
+    try:
+        ensure_broker_available()
+        from app.worker.celery_app import celery_app
+
+        celery_app.control.revoke(task_id, terminate=terminate, signal="SIGTERM")
+        return {"revoked": True, "terminate": terminate}
+    except (CeleryError, OperationalError, OSError, ConnectionError, RuntimeError, redis.RedisError) as exc:
+        return {"revoked": False, "message": str(exc)}

@@ -18,6 +18,8 @@ from app.db.models import (
     ReviewTask,
     Notification,
     AppUser,
+    TaskEvent,
+    WorkbenchEvent,
 )
 from app.services.dashboard import build_dashboard
 
@@ -80,6 +82,10 @@ class DashboardAggregationTest(unittest.TestCase):
         quality_job.updated_at = now
         audit = AuditLog(id=1, actor="张工", action="upload_document", entity_type="project_document", entity_id="D001", detail={})
         audit.created_at = now
+        workbench_event = WorkbenchEvent(id="WE-1", project_id="P001", target_type="work_item", target_id="WI-1", action="comment", actor_id="U1", actor_name="项目负责人", comment="补充意见", payload={})
+        workbench_event.created_at = now
+        task_event = TaskEvent(id="TE-1", project_id="P001", task_kind="parse", task_id="JOB-1", status="queued", stage="提交解析", message="资料解析任务已提交。", actor_id="U1", actor_name="项目负责人", payload={})
+        task_event.created_at = now
 
         db = FakeSession({
             Project: [project],
@@ -96,6 +102,8 @@ class DashboardAggregationTest(unittest.TestCase):
             ReviewTask: [],
             Notification: [],
             AppUser: [],
+            WorkbenchEvent: [workbench_event],
+            TaskEvent: [task_event],
         })
 
         result = build_dashboard(db, {"id": "U1", "name": "项目负责人", "role": "项目负责人", "department": "咨询部", "status": "启用"}, "P001")
@@ -107,7 +115,11 @@ class DashboardAggregationTest(unittest.TestCase):
         self.assertTrue(any(item["priority"] == "P0" for item in result["workItems"]))
         self.assertTrue(any(item["status"] == "运行中" for item in result["tasks"]))
         self.assertTrue(result["capabilities"]["persistentWorkItems"])
+        self.assertTrue(result["capabilities"]["workItemComments"])
+        self.assertTrue(result["capabilities"]["taskStageEvents"])
         self.assertTrue(any(item.get("persistent") for item in result["workItems"]))
+        self.assertEqual(result["latestEvents"][0]["action"], "comment")
+        self.assertEqual(result["taskEvents"][0]["stage"], "提交解析")
         blocker_metric = next(item for item in result["metrics"] if item["key"] == "blockingIssues")
         self.assertEqual(blocker_metric["value"], 1)
         self.assertEqual(result["workflow"][0]["percentage"], 0)

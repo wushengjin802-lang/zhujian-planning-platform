@@ -226,6 +226,47 @@ class Notification(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 
+class WorkbenchEvent(Base):
+    __tablename__ = "workbench_events"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    target_type: Mapped[str] = mapped_column(Text)
+    target_id: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text)
+    actor_id: Mapped[str | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"))
+    actor_name: Mapped[str] = mapped_column(Text)
+    comment: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class TaskEvent(Base):
+    __tablename__ = "task_events"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    task_kind: Mapped[str] = mapped_column(Text)
+    task_id: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text)
+    stage: Mapped[str] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(Text)
+    actor_id: Mapped[str | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"))
+    actor_name: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class NotificationSubscription(Base):
+    __tablename__ = "notification_subscriptions"
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"), primary_key=True)
+    event_type: Mapped[str] = mapped_column(Text, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    delivery: Mapped[str] = mapped_column(Text, server_default=text("'in_app'"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
 

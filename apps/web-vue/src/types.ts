@@ -268,6 +268,33 @@ export interface DashboardNotification {
   createdAt?: string | null;
 }
 
+export interface WorkbenchEvent {
+  id: string;
+  projectId?: string | null;
+  targetType: string;
+  targetId: string;
+  action: string;
+  actorId?: string | null;
+  actorName: string;
+  comment?: string | null;
+  payload: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface TaskEvent {
+  id: string;
+  projectId?: string | null;
+  taskKind: "parse" | "quality" | "artifact" | string;
+  taskId: string;
+  status: string;
+  stage: string;
+  message: string;
+  actorId?: string | null;
+  actorName?: string | null;
+  payload: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
 export interface DashboardActivity {
   id: string;
   actor: string;
@@ -290,6 +317,8 @@ export interface DashboardPayload {
   reviewQueue: DashboardReviewItem[];
   tasks: DashboardTask[];
   notifications: DashboardNotification[];
+  latestEvents: WorkbenchEvent[];
+  taskEvents: TaskEvent[];
   recentActivities: DashboardActivity[];
   quickActions: Array<{ key: string; label: string; description: string; route: string }>;
   capabilities?: Record<string, boolean>;
