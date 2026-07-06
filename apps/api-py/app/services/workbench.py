@@ -209,6 +209,63 @@ def _find_notification(db: Session, source_type: str, source_id: str, user_id: s
     return db.scalar(stmt)
 
 
+def _has_workbench_event(db: Session, target_type: str, target_id: str, action: str) -> bool:
+    fake_rows = getattr(db, "rows_by_model", None)
+    if fake_rows is not None:
+        return any(
+            row.target_type == target_type and row.target_id == target_id and row.action == action
+            for row in fake_rows.get(WorkbenchEvent, [])
+        )
+    return bool(
+        db.scalar(
+            select(WorkbenchEvent).where(
+                WorkbenchEvent.target_type == target_type,
+                WorkbenchEvent.target_id == target_id,
+                WorkbenchEvent.action == action,
+            )
+        )
+    )
+
+
+def list_target_events(db: Session, target_type: str, target_id: str, action: str | None = None) -> list[WorkbenchEvent]:
+    fake_rows = getattr(db, "rows_by_model", None)
+    if fake_rows is not None:
+        rows = [
+            row
+            for row in fake_rows.get(WorkbenchEvent, [])
+            if row.target_type == target_type and row.target_id == target_id and (action is None or row.action == action)
+        ]
+        return sorted(rows, key=lambda row: (row.created_at or _now(), row.id), reverse=True)
+    stmt = select(WorkbenchEvent).where(WorkbenchEvent.target_type == target_type, WorkbenchEvent.target_id == target_id)
+    if action:
+        stmt = stmt.where(WorkbenchEvent.action == action)
+    return db.scalars(stmt.order_by(WorkbenchEvent.created_at.desc(), WorkbenchEvent.id.desc())).all()
+
+
+def countersign_summary(db: Session, task: ReviewTask) -> dict[str, Any]:
+    required = 2 if task.priority == "P0" else 1 if task.priority == "P1" else 0
+    events = list_target_events(db, "review_task", task.id, "countersign")
+    signers: dict[str, str] = {}
+    for event in events:
+        key = event.actor_id or event.actor_name
+        signers[key] = event.actor_name
+    signed = len(signers)
+    return {
+        "required": required,
+        "signed": signed,
+        "remaining": max(0, required - signed),
+        "gatePassed": signed >= required,
+        "signers": list(signers.values()),
+        "label": "无需会签" if required == 0 else f"已会签 {signed}/{required}",
+    }
+
+
+def assert_review_approval_gate(db: Session, task: ReviewTask) -> None:
+    summary = countersign_summary(db, task)
+    if not summary["gatePassed"]:
+        raise PermissionError(f"该审核任务需完成会签后才能通过：{summary['label']}")
+
+
 def _upsert_work_item(db: Session, *, source_type: str, source_id: str, project_id: str | None, category: str,
                       title: str, detail: str, priority: str, owner: str, route: str, created_by: str | None) -> None:
     item = _find_work_item(db, source_type, source_id)
@@ -353,6 +410,73 @@ def ensure_sla_notifications(db: Session, work_items: Iterable[WorkItem], review
             route=task.route or "/dashboard",
             user_id=task.reviewer_id,
         )
+
+def ensure_sla_escalations(db: Session, work_items: Iterable[WorkItem], review_tasks: Iterable[ReviewTask], actor: dict[str, Any]) -> None:
+    """Escalate overdue/due-soon workbench rows without creating a new business module.
+
+    v1.6 closes the workbench SLA loop by materialising reminder/escalation
+    events and notifications once per row. It deliberately avoids workflow rules
+    outside the dashboard/workbench boundary.
+    """
+    for item in work_items:
+        due_status = _due_status(item.due_at, item.status)
+        if due_status not in {"overdue", "due_soon"}:
+            continue
+        action = "sla_escalated" if due_status == "overdue" else "sla_reminded"
+        if _has_workbench_event(db, "work_item", item.id, action):
+            continue
+        comment = _sla_label(item.due_at, item.status, item.priority)
+        add_workbench_event(
+            db,
+            project_id=item.project_id,
+            target_type="work_item",
+            target_id=item.id,
+            action=action,
+            actor=actor,
+            comment=comment,
+            payload={"priority": item.priority, "dueAt": item.due_at.isoformat() if item.due_at else None},
+        )
+        _upsert_notification(
+            db,
+            source_type=f"work_item_{action}",
+            source_id=item.id,
+            project_id=item.project_id,
+            level="danger" if due_status == "overdue" else "warning",
+            title=f"工作项{'SLA升级' if due_status == 'overdue' else '到期提醒'}：{item.title}",
+            message=comment,
+            route=item.route or "/dashboard",
+            user_id=item.assignee_id,
+        )
+    for task in review_tasks:
+        due_status = _due_status(task.due_at, task.status)
+        if due_status not in {"overdue", "due_soon"}:
+            continue
+        action = "sla_escalated" if due_status == "overdue" else "sla_reminded"
+        if _has_workbench_event(db, "review_task", task.id, action):
+            continue
+        comment = _sla_label(task.due_at, task.status, task.priority)
+        add_workbench_event(
+            db,
+            project_id=task.project_id,
+            target_type="review_task",
+            target_id=task.id,
+            action=action,
+            actor=actor,
+            comment=comment,
+            payload={"priority": task.priority, "dueAt": task.due_at.isoformat() if task.due_at else None},
+        )
+        _upsert_notification(
+            db,
+            source_type=f"review_task_{action}",
+            source_id=task.id,
+            project_id=task.project_id,
+            level="danger" if due_status == "overdue" else "warning",
+            title=f"审核任务{'SLA升级' if due_status == 'overdue' else '到期提醒'}：{task.title}",
+            message=comment,
+            route=task.route or "/dashboard",
+            user_id=task.reviewer_id,
+        )
+
 
 def ensure_workbench_state(
     db: Session,

@@ -161,7 +161,9 @@ function eventActionLabel(action: string) {
     assign: "分配",
     countersign: "会签",
     approve: "通过",
-    reject: "退回"
+    reject: "退回",
+    sla_reminded: "SLA提醒",
+    sla_escalated: "SLA升级"
   };
   return labels[action] ?? action;
 }
@@ -294,6 +296,14 @@ watch(
               <span>{{ card.message }}<em v-if="card.alerts"> · {{ card.alerts }} 项需关注</em></span>
             </div>
           </div>
+          <el-alert
+            v-if="dashboard.cardErrors?.length"
+            class="card-error-alert"
+            type="warning"
+            show-icon
+            :closable="false"
+            :title="`有 ${dashboard.cardErrors.length} 个工作台卡片数据降级显示`"
+          />
         </el-card>
       </section>
 
@@ -432,6 +442,7 @@ watch(
                 <strong>{{ item.title }}</strong>
                 <small>{{ item.projectName }} · {{ item.type }} · {{ item.description }}</small>
                 <el-tag v-if="dueLabel(item.dueStatus, item.dueAt)" :type="dueType(item.dueStatus)" effect="plain" size="small">{{ item.slaLabel || dueLabel(item.dueStatus, item.dueAt) }}</el-tag>
+                <el-tag v-if="item.countersign" :type="item.countersign.gatePassed ? 'success' : 'warning'" effect="plain" size="small">{{ item.countersign.label }}</el-tag>
               </span>
               <span class="work-owner">{{ item.reviewerName || item.submitter }}</span>
               <el-tag type="warning" effect="plain" size="small">{{ item.status }}</el-tag>
@@ -527,6 +538,7 @@ watch(
             <el-table-column label="操作" width="145" align="right">
               <template #default="{ row }">
                 <el-button v-if="row.canCancel" link type="warning" @click="store.cancelDashboardTask(row.id, row.taskKind)">取消</el-button>
+                <el-button v-if="row.stuck" link type="danger" @click="store.cancelDashboardTask(row.id, row.taskKind, true)">强制终止</el-button>
                 <el-button v-if="row.canRetry || row.stuck" link type="danger" @click="store.retryDashboardTask(row.id, row.taskKind)">重试</el-button>
                 <el-button link type="primary" @click="openRoute(row.route, row.projectId)">查看</el-button>
               </template>

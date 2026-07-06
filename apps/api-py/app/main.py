@@ -30,6 +30,7 @@ from app.db.models import (
     ReportChapter,
     ReportTemplate,
     Notification,
+    NotificationSubscription,
     ProjectMember,
     ReviewTask,
     TaskEvent,
@@ -41,7 +42,7 @@ from app.services.artifacts import generate_artifact
 from app.services.auth import authenticate_user, get_session_user, logout_session
 from app.services.capabilities import platform_status
 from app.services.dashboard import build_dashboard
-from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, is_management_role, map_task_event, map_workbench_event
+from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, assert_review_approval_gate, is_management_role, map_task_event, map_workbench_event
 from app.services.documents import parse_document
 from app.services.estimates import calculate_estimate, confirm_estimate, get_estimate, map_estimate
 from app.services.jobs import enqueue_or_run, revoke_task
@@ -51,7 +52,7 @@ from app.services.rag import generate_chapter_with_rag
 from app.services.storage import persist_upload, storage
 from app.worker.tasks import export_artifact_task, parse_document_task, quality_check_task
 
-app = FastAPI(title="住建项目策划平台 API", version="1.5.0")
+app = FastAPI(title="住建项目策划平台 API", version="1.6.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -130,6 +131,12 @@ class NotificationBatchAction(BaseModel):
 
 class TaskAction(BaseModel):
     taskKind: str
+    force: bool = False
+
+
+class NotificationSubscriptionUpdate(BaseModel):
+    enabled: bool = True
+    delivery: str = "in_app"
 
 
 
@@ -152,6 +159,34 @@ def _is_same_user(value: str | None, user: dict) -> bool:
 
 def _can_manage_workbench(user: dict) -> bool:
     return is_management_role(user.get("role"))
+
+
+def _notification_event_label(event_type: str) -> str:
+    labels = {
+        "work_item_sla": "工作项SLA提醒",
+        "review_task_sla": "审核任务SLA提醒",
+        "quality_issue": "质量问题提醒",
+        "task_stuck": "任务卡住提醒",
+        "review_assignment": "审核分配提醒",
+    }
+    return labels.get(event_type, event_type)
+
+
+def map_subscription(row: NotificationSubscription) -> dict:
+    return {
+        "eventType": row.event_type,
+        "label": _notification_event_label(row.event_type),
+        "enabled": row.enabled,
+        "delivery": row.delivery,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _default_subscriptions(user: dict) -> list[dict]:
+    return [
+        {"eventType": item, "label": _notification_event_label(item), "enabled": True, "delivery": "in_app", "updatedAt": None}
+        for item in ["work_item_sla", "review_task_sla", "quality_issue", "task_stuck", "review_assignment"]
+    ]
 
 
 def assert_work_item_actor(item: WorkItem, user: dict, action: str) -> None:
@@ -349,6 +384,67 @@ def countersign_review_task(task_id: str, payload: ReviewAction, db: Session = D
     return map_workbench_event(event)
 
 
+@app.get("/api/notifications")
+def list_notifications(
+    status: str | None = None,
+    projectId: str | None = None,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> list[dict]:
+    if projectId:
+        try:
+            assert_project_visible(db, user, projectId)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    stmt = select(Notification)
+    if status:
+        stmt = stmt.where(Notification.status == status)
+    if projectId:
+        stmt = stmt.where(Notification.project_id == projectId)
+    if not _can_manage_workbench(user):
+        stmt = stmt.where((Notification.user_id.is_(None)) | (Notification.user_id == user["id"]))
+    rows = db.scalars(stmt.order_by(Notification.created_at.desc()).limit(100)).all()
+    return [
+        {
+            "id": row.id,
+            "level": row.level,
+            "title": row.title,
+            "message": row.message,
+            "route": row.route,
+            "status": row.status,
+            "projectId": row.project_id,
+            "sourceType": row.source_type,
+            "sourceId": row.source_id,
+            "createdAt": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in rows
+    ]
+
+
+@app.get("/api/notification-subscriptions")
+def list_notification_subscriptions(db: Session = Depends(get_db), user: dict = Depends(current_user)) -> list[dict]:
+    rows = db.scalars(select(NotificationSubscription).where(NotificationSubscription.user_id == user["id"]).order_by(NotificationSubscription.event_type)).all()
+    by_type = {row.event_type: map_subscription(row) for row in rows}
+    defaults = _default_subscriptions(user)
+    return [by_type.get(item["eventType"], item) for item in defaults]
+
+
+@app.put("/api/notification-subscriptions/{event_type}")
+def update_notification_subscription(event_type: str, payload: NotificationSubscriptionUpdate, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    row = db.get(NotificationSubscription, {"user_id": user["id"], "event_type": event_type})
+    now = datetime.now(timezone.utc)
+    if not row:
+        row = NotificationSubscription(user_id=user["id"], event_type=event_type, enabled=payload.enabled, delivery=payload.delivery, updated_at=now)
+        db.add(row)
+    else:
+        row.enabled = payload.enabled
+        row.delivery = payload.delivery
+        row.updated_at = now
+    write_audit(db, user["name"], "update_notification_subscription", "notification_subscription", event_type, {"enabled": payload.enabled, "delivery": payload.delivery})
+    db.commit()
+    return map_subscription(row)
+
+
 @app.post("/api/notifications/read-all")
 def mark_notifications_read_all(payload: NotificationBatchAction | None = None, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     stmt = select(Notification).where(Notification.status == "未读")
@@ -479,6 +575,10 @@ def approve_review_task(task_id: str, payload: ReviewAction | None = None, db: S
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     assert_review_task_actor(task, user, "approve")
+    try:
+        assert_review_approval_gate(db, task)
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     task.status = "已通过"
     task.reviewer_id = task.reviewer_id or user["id"]
     task.decision = "approved"
@@ -567,7 +667,7 @@ def mark_notification_read(notification_id: str, db: Session = Depends(get_db), 
 def cancel_background_task(task_id: str, payload: TaskAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     now = datetime.now(timezone.utc)
     task_project_id = None
-    revoke_result = revoke_task(task_id, terminate=False)
+    revoke_result = revoke_task(task_id, terminate=payload.force)
     if payload.taskKind == "parse":
         job = db.get(ParseJob, task_id)
         if not job:
@@ -609,10 +709,12 @@ def cancel_background_task(task_id: str, payload: TaskAction, db: Session = Depe
         artifact.updated_at = current_day(db)
     else:
         raise HTTPException(status_code=400, detail="Unsupported taskKind")
-    add_task_event(db, project_id=task_project_id, task_kind=payload.taskKind, task_id=task_id, status="cancelled", stage="用户取消", message="已登记取消请求。", actor=user, payload=revoke_result)
-    write_audit(db, user["name"], "cancel_background_task", payload.taskKind, task_id, {"revoke": revoke_result})
+    stage = "强制终止" if payload.force else "用户取消"
+    message = "已登记强制终止请求。" if payload.force else "已登记取消请求。"
+    add_task_event(db, project_id=task_project_id, task_kind=payload.taskKind, task_id=task_id, status="cancelled", stage=stage, message=message, actor=user, payload={**revoke_result, "force": payload.force})
+    write_audit(db, user["name"], "cancel_background_task", payload.taskKind, task_id, {"revoke": revoke_result, "force": payload.force})
     db.commit()
-    return {"id": task_id, "taskKind": payload.taskKind, "status": "cancelled", "revoke": revoke_result}
+    return {"id": task_id, "taskKind": payload.taskKind, "status": "cancelled", "force": payload.force, "revoke": revoke_result}
 
 
 @app.post("/api/tasks/{task_id}/retry", status_code=202)

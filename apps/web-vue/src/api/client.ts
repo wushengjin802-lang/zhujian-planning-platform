@@ -1,4 +1,4 @@
-import type { AppUser, Artifact, BootstrapPayload, DashboardPayload, FactItem, InvestmentEstimate, PlatformStatus, Project, ProjectDocument, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
+import type { AppUser, Artifact, BootstrapPayload, DashboardNotification, DashboardPayload, FactItem, InvestmentEstimate, NotificationSubscription, PlatformStatus, Project, ProjectDocument, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
 
 const tokenKey = "zhujian.sessionToken";
 
@@ -159,10 +159,10 @@ export function markNotificationRead(id: string) {
   return request<{ id: string; status: string }>(`/api/notifications/${id}/read`, { method: "POST" });
 }
 
-export function cancelBackgroundTask(id: string, taskKind: "parse" | "quality" | "artifact") {
-  return request<{ id: string; taskKind: string; status: string }>(`/api/tasks/${id}/cancel`, {
+export function cancelBackgroundTask(id: string, taskKind: "parse" | "quality" | "artifact", force = false) {
+  return request<{ id: string; taskKind: string; status: string; force?: boolean }>(`/api/tasks/${id}/cancel`, {
     method: "POST",
-    body: JSON.stringify({ taskKind })
+    body: JSON.stringify({ taskKind, force })
   });
 }
 
@@ -215,6 +215,25 @@ export function countersignReviewTask(id: string, comment?: string) {
 
 export function loadReviewTaskEvents(id: string) {
   return request<WorkbenchEvent[]>(`/api/review-tasks/${id}/events`);
+}
+
+export function listNotifications(status?: string, projectId?: string) {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (projectId) params.set("projectId", projectId);
+  const query = params.toString();
+  return request<DashboardNotification[]>(`/api/notifications${query ? `?${query}` : ""}`);
+}
+
+export function listNotificationSubscriptions() {
+  return request<NotificationSubscription[]>("/api/notification-subscriptions");
+}
+
+export function updateNotificationSubscription(eventType: string, enabled: boolean, delivery = "in_app") {
+  return request<NotificationSubscription>(`/api/notification-subscriptions/${encodeURIComponent(eventType)}`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled, delivery })
+  });
 }
 
 export function markNotificationsReadAll(projectId?: string) {

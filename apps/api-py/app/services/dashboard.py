@@ -29,10 +29,12 @@ from app.services.workbench import (
     ACTIVE_WORK_STATUSES,
     add_task_event,
     apply_project_visibility,
+    countersign_summary,
+    ensure_sla_escalations,
+    ensure_sla_notifications,
     ensure_workbench_state,
     is_management_role,
     map_notification,
-    ensure_sla_notifications,
     map_review_task,
     map_task_event,
     map_work_item,
@@ -42,6 +44,22 @@ from app.services.workbench import (
 
 
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def _safe_scalars(db: Session, statement: Any, card_key: str, errors: list[dict[str, Any]]) -> list[Any]:
+    try:
+        return db.scalars(statement).all()
+    except Exception as exc:  # pragma: no cover - defensive card-level fallback
+        errors.append({"card": card_key, "message": str(exc), "level": "degraded"})
+        return []
+
+
+def _safe_scalar(db: Session, statement: Any, card_key: str, errors: list[dict[str, Any]]) -> Any | None:
+    try:
+        return db.scalar(statement)
+    except Exception as exc:  # pragma: no cover - defensive card-level fallback
+        errors.append({"card": card_key, "message": str(exc), "level": "degraded"})
+        return None
 
 
 def _percentage(done: int, total: int) -> int:
@@ -214,7 +232,8 @@ def _activity_label(action: str) -> str:
 
 
 def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = None) -> dict[str, Any]:
-    all_projects_raw = db.scalars(select(Project).order_by(Project.updated_at.desc(), Project.id)).all()
+    card_errors: list[dict[str, Any]] = []
+    all_projects_raw = _safe_scalars(db, select(Project).order_by(Project.updated_at.desc(), Project.id), "projects", card_errors)
     visibility = visible_project_ids(db, user)
     all_projects = apply_project_visibility(all_projects_raw, visibility)
 
@@ -229,31 +248,40 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
     project_by_id = {project.id: project for project in all_projects}
 
     if project_ids:
-        documents = db.scalars(
+        documents = _safe_scalars(
+            db,
             select(ProjectDocument)
             .where(ProjectDocument.project_id.in_(project_ids))
-            .order_by(ProjectDocument.created_at.desc(), ProjectDocument.id)
-        ).all()
-        facts = db.scalars(select(FactItem).where(FactItem.project_id.in_(project_ids)).order_by(FactItem.id)).all()
-        chapters = db.scalars(
+            .order_by(ProjectDocument.created_at.desc(), ProjectDocument.id),
+            "documents",
+            card_errors,
+        )
+        facts = _safe_scalars(db, select(FactItem).where(FactItem.project_id.in_(project_ids)).order_by(FactItem.id), "facts", card_errors)
+        chapters = _safe_scalars(
+            db,
             select(ReportChapter)
             .where(ReportChapter.project_id.in_(project_ids))
-            .order_by(ReportChapter.chapter_no)
-        ).all()
-        issues = db.scalars(select(QualityIssue).where(QualityIssue.project_id.in_(project_ids)).order_by(QualityIssue.id)).all()
-        artifacts = db.scalars(select(Artifact).where(Artifact.project_id.in_(project_ids)).order_by(Artifact.id)).all()
-        estimates = db.scalars(
+            .order_by(ReportChapter.chapter_no),
+            "chapters",
+            card_errors,
+        )
+        issues = _safe_scalars(db, select(QualityIssue).where(QualityIssue.project_id.in_(project_ids)).order_by(QualityIssue.id), "quality", card_errors)
+        artifacts = _safe_scalars(db, select(Artifact).where(Artifact.project_id.in_(project_ids)).order_by(Artifact.id), "artifacts", card_errors)
+        estimates = _safe_scalars(
+            db,
             select(InvestmentEstimate)
             .where(InvestmentEstimate.project_id.in_(project_ids))
-            .order_by(InvestmentEstimate.created_at.desc())
-        ).all()
+            .order_by(InvestmentEstimate.created_at.desc()),
+            "estimates",
+            card_errors,
+        )
     else:
         documents, facts, chapters, issues, artifacts, estimates = [], [], [], [], [], []
 
     ensure_workbench_state(db, user, project_by_id, documents, facts, chapters, issues, estimates)
     db.commit()
 
-    users = db.scalars(select(AppUser).order_by(AppUser.id)).all()
+    users = _safe_scalars(db, select(AppUser).order_by(AppUser.id), "users", card_errors)
     users_by_id = {user_row.id: user_row for user_row in users}
 
     work_stmt = select(WorkItem).where(WorkItem.status.in_(ACTIVE_WORK_STATUSES))
@@ -275,36 +303,53 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         review_stmt = review_stmt.where((ReviewTask.reviewer_id.is_(None)) | (ReviewTask.reviewer_id == uid))
         notification_stmt = notification_stmt.where((Notification.user_id.is_(None)) | (Notification.user_id == uid))
 
-    work_items_rows = db.scalars(work_stmt.order_by(WorkItem.priority, WorkItem.updated_at.desc()).limit(50)).all()
-    review_rows = db.scalars(review_stmt.order_by(ReviewTask.priority, ReviewTask.updated_at.desc()).limit(30)).all()
+    work_items_rows = _safe_scalars(db, work_stmt.order_by(WorkItem.priority, WorkItem.updated_at.desc()).limit(50), "workItems", card_errors)
+    review_rows = _safe_scalars(db, review_stmt.order_by(ReviewTask.priority, ReviewTask.updated_at.desc()).limit(30), "reviewQueue", card_errors)
     ensure_sla_notifications(db, work_items_rows, review_rows)
+    ensure_sla_escalations(db, work_items_rows, review_rows, user)
     db.commit()
-    note_rows = db.scalars(notification_stmt.order_by(Notification.created_at.desc()).limit(20)).all()
+    note_rows = _safe_scalars(db, notification_stmt.order_by(Notification.created_at.desc()).limit(20), "notifications", card_errors)
 
     work_items = [map_work_item(item, project_by_id, users_by_id, user) for item in work_items_rows]
     work_items.sort(key=lambda item: (PRIORITY_ORDER.get(item["priority"], 9), item["category"], item["title"]))
-    review_queue = [map_review_task(item, project_by_id, users_by_id, user) for item in review_rows]
+    review_queue = []
+    for row in review_rows:
+        mapped = map_review_task(row, project_by_id, users_by_id, user)
+        summary = countersign_summary(db, row)
+        mapped["countersign"] = summary
+        if not summary["gatePassed"]:
+            actions = mapped.setdefault("actions", {})
+            actions["canApprove"] = False
+            reasons = mapped.setdefault("actionReasons", {})
+            reasons["approve"] = f"需完成会签后才能通过：{summary['label']}"
+        review_queue.append(mapped)
     review_queue.sort(key=lambda item: PRIORITY_ORDER.get(item["priority"], 9))
 
     document_by_id = {document.id: document for document in documents}
 
     parse_jobs = []
     if document_by_id:
-        parse_jobs = db.scalars(
+        parse_jobs = _safe_scalars(
+            db,
             select(ParseJob)
             .where(ParseJob.document_id.in_(list(document_by_id)))
             .order_by(ParseJob.created_at.desc())
-            .limit(30)
-        ).all()
+            .limit(30),
+            "tasks",
+            card_errors,
+        )
 
     quality_jobs = []
     if project_ids:
-        quality_jobs = db.scalars(
+        quality_jobs = _safe_scalars(
+            db,
             select(QualityCheckJob)
             .where(QualityCheckJob.project_id.in_(project_ids))
             .order_by(QualityCheckJob.created_at.desc())
-            .limit(30)
-        ).all()
+            .limit(30),
+            "tasks",
+            card_errors,
+        )
 
     tasks: list[dict[str, Any]] = []
     for job in parse_jobs:
@@ -368,7 +413,7 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
                 "type": "成果导出",
                 "name": artifact.name,
                 "projectId": artifact.project_id,
-                "projectName": project_by_id[artifact.project_id].name,
+                "projectName": project_by_id.get(artifact.project_id).name if project_by_id.get(artifact.project_id) else artifact.project_id,
                 "status": _normalise_task_status(artifact.status),
                 "rawStatus": artifact.status,
                 "message": "成果正在生成" if artifact.status == "生成中" else "成果生成受阻，请处理质量问题后重试",
@@ -396,13 +441,14 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         db.commit()
 
     sla_summary = _sla_summary(work_items, review_queue)
+    error_by_card = {item["card"]: item for item in card_errors}
     card_health = [
-        _card_health("projects", "项目范围", len(scoped_projects)),
-        _card_health("workItems", "待办事项", len(work_items), sla_summary["overdue"]),
-        _card_health("reviewQueue", "审核队列", len(review_queue), sum(1 for item in review_queue if item.get("dueStatus") == "overdue")),
-        _card_health("tasks", "异步任务", len(tasks), len(stuck_tasks) + len(failed_tasks)),
-        _card_health("quality", "质量问题", len(unresolved_issues), len(blockers)),
-        _card_health("notifications", "提醒通知", len(note_rows)),
+        _card_health("projects", "项目范围", len(scoped_projects), status="degraded" if "projects" in error_by_card else None),
+        _card_health("workItems", "待办事项", len(work_items), sla_summary["overdue"], status="degraded" if "workItems" in error_by_card else None),
+        _card_health("reviewQueue", "审核队列", len(review_queue), sum(1 for item in review_queue if item.get("dueStatus") == "overdue"), status="degraded" if "reviewQueue" in error_by_card else None),
+        _card_health("tasks", "异步任务", len(tasks), len(stuck_tasks) + len(failed_tasks), status="degraded" if "tasks" in error_by_card else None),
+        _card_health("quality", "质量问题", len(unresolved_issues), len(blockers), status="degraded" if "quality" in error_by_card else None),
+        _card_health("notifications", "提醒通知", len(note_rows), status="degraded" if "notifications" in error_by_card else None),
     ]
 
     avg_project_progress = round(sum(project.progress for project in scoped_projects) / len(scoped_projects)) if scoped_projects else 0
@@ -590,12 +636,14 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
     elif visibility is not None:
         event_stmt = event_stmt.where(WorkbenchEvent.project_id.in_(project_ids))
         task_event_stmt = task_event_stmt.where(TaskEvent.project_id.in_(project_ids))
-    latest_events = [map_workbench_event(item) for item in db.scalars(event_stmt.order_by(WorkbenchEvent.created_at.desc()).limit(20)).all()]
-    task_events = [map_task_event(item) for item in db.scalars(task_event_stmt.order_by(TaskEvent.created_at.desc()).limit(30)).all()]
+    latest_event_rows = _safe_scalars(db, event_stmt.order_by(WorkbenchEvent.created_at.desc()).limit(20), "events", card_errors)
+    task_event_rows = _safe_scalars(db, task_event_stmt.order_by(TaskEvent.created_at.desc()).limit(30), "tasks", card_errors)
+    latest_events = [map_workbench_event(item) for item in latest_event_rows]
+    task_events = [map_task_event(item) for item in task_event_rows]
 
     activity_project_filter = list(project_by_id)
     activity_query = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(12)
-    recent_logs = db.scalars(activity_query).all()
+    recent_logs = _safe_scalars(db, activity_query, "activities", card_errors)
     recent_activities = [
         {
             "id": str(log.id),
@@ -623,6 +671,7 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         "notifications": notifications[:12],
         "slaSummary": sla_summary,
         "cardHealth": card_health,
+        "cardErrors": card_errors,
         "latestEvents": latest_events,
         "taskEvents": task_events,
         "recentActivities": recent_activities,
@@ -649,5 +698,11 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             "slaNotificationMaterialised": True,
             "taskHeartbeat": True,
             "cardHealth": True,
+            "slaAutoEscalation": True,
+            "reviewCountersignGate": True,
+            "notificationCenter": True,
+            "notificationSubscriptions": True,
+            "forceTaskTerminate": True,
+            "cardFaultTolerance": True,
         },
     }

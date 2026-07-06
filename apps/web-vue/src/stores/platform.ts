@@ -21,6 +21,8 @@ import {
   getCurrentUser,
   loadBootstrap,
   countersignReviewTask,
+  listNotificationSubscriptions,
+  listNotifications,
   loadDashboard,
   loadInvestmentEstimate,
   loadReviewTaskEvents,
@@ -35,6 +37,7 @@ import {
   requestArtifactExport,
   retryBackgroundTask,
   transferWorkItem,
+  updateNotificationSubscription,
   runDocumentParse,
   updateChapter,
   updateFact,
@@ -71,6 +74,7 @@ export const usePlatformStore = defineStore("platform", () => {
   const dashboard = ref<DashboardPayload | null>(null);
   const dashboardScope = ref<"current" | "all">("current");
   const dashboardLoading = ref(false);
+  const notificationSubscriptions = ref([] as import("../types").NotificationSubscription[]);
   const notice = ref("正在加载项目数据");
 
   const currentProject = computed(() => data.value.projects.find((item) => item.id === currentProjectId.value) ?? data.value.projects[0]);
@@ -264,8 +268,8 @@ export const usePlatformStore = defineStore("platform", () => {
     return runAction("通知已读", () => markNotificationRead(id));
   }
 
-  function cancelDashboardTask(id: string, taskKind: "parse" | "quality" | "artifact") {
-    return runAction("取消任务", () => cancelBackgroundTask(id, taskKind));
+  function cancelDashboardTask(id: string, taskKind: "parse" | "quality" | "artifact", force = false) {
+    return runAction(force ? "强制终止任务" : "取消任务", () => cancelBackgroundTask(id, taskKind, force));
   }
 
   function retryDashboardTask(id: string, taskKind: "parse" | "quality" | "artifact") {
@@ -300,6 +304,21 @@ export const usePlatformStore = defineStore("platform", () => {
     return runAction("归档通知", () => archiveNotification(id));
   }
 
+  async function fetchNotificationSubscriptions() {
+    notificationSubscriptions.value = await listNotificationSubscriptions();
+  }
+
+  function toggleNotificationSubscription(eventType: string, enabled: boolean) {
+    return runAction("更新通知订阅", async () => {
+      await updateNotificationSubscription(eventType, enabled);
+      notificationSubscriptions.value = await listNotificationSubscriptions();
+    });
+  }
+
+  async function fetchAllNotifications(status?: string) {
+    return listNotifications(status, dashboardScope.value === "current" ? currentProject.value?.id : undefined);
+  }
+
   return {
     data,
     loading,
@@ -310,6 +329,7 @@ export const usePlatformStore = defineStore("platform", () => {
     dashboard,
     dashboardScope,
     dashboardLoading,
+    notificationSubscriptions,
     currentProjectId,
     currentProject,
     projectDocuments,
@@ -354,6 +374,9 @@ export const usePlatformStore = defineStore("platform", () => {
     assignDashboardReviewTask,
     readAllDashboardNotifications,
     archiveDashboardNotification,
+    fetchNotificationSubscriptions,
+    toggleNotificationSubscription,
+    fetchAllNotifications,
     loadWorkItemEvents,
     loadReviewTaskEvents,
     loadTaskEvents

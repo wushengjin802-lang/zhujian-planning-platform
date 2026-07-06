@@ -1,6 +1,7 @@
 INFO:     Will watch for changes in these directories: ['D:\\12_其他项目\\27_FreeCAD\\方案设计\\zhujian-planning-platform\\apps\\api-py']
 INFO:     Uvicorn running on http://0.0.0.0:8787 (Press CTRL+C to quit)
-INFO:     Started reloader process [29676] using WatchFiles
-INFO:     Started server process [29592]
+INFO:     Started reloader process [9872] using WatchFiles
+INFO:     Started server process [28708]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\services\documents.py', 'app\core\config.py', 'tests\test_dashboard.py', 'alembic\versions\20260706_0004_workbench_boundary_models.py', 'alembic\versions\20260703_0002_enable_spatial_vector.py', 'alembic\versions\20260703_0003_add_investment_estimates.py', 'app\services\office_converter.py', 'alembic\versions\20260706_0005_workbench_v12_events.py', 'app\services\auth.py', 'app\worker\tasks.py', 'app\services\storage.py', 'app\services\model_gateway.py', 'app\services\estimates.py', 'app\__init__.py', 'app\services\quality.py', 'app\services\capabilities.py', 'app\main.py', 'alembic\env.py', 'app\services\rag.py', 'app\worker\celery_app.py', 'app\services\workbench.py', 'app\services\dashboard.py', 'app\db\models.py', 'app\services\jobs.py', 'app\db\session.py', 'app\services\artifacts.py', 'alembic\versions\20260703_0001_phase1_pdd_baseline.py'. Reloading...

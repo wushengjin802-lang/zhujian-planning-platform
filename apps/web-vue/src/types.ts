@@ -283,6 +283,14 @@ export interface DashboardReviewItem {
     canViewEvents?: boolean;
   };
   actionReasons?: Record<string, string>;
+  countersign?: {
+    required: number;
+    signed: number;
+    remaining: number;
+    gatePassed: boolean;
+    signers: string[];
+    label: string;
+  };
 }
 
 export interface DashboardTask {
@@ -355,6 +363,14 @@ export interface DashboardActivity {
   detail: Record<string, unknown>;
 }
 
+export interface NotificationSubscription {
+  eventType: string;
+  label: string;
+  enabled: boolean;
+  delivery: string;
+  updatedAt?: string | null;
+}
+
 export interface DashboardPayload {
   generatedAt: string;
   scope: "project" | "all";
@@ -369,6 +385,7 @@ export interface DashboardPayload {
   notifications: DashboardNotification[];
   slaSummary?: DashboardSlaSummary;
   cardHealth?: DashboardCardHealth[];
+  cardErrors?: Array<{ card: string; message: string; level: string }>;
   latestEvents: WorkbenchEvent[];
   taskEvents: TaskEvent[];
   recentActivities: DashboardActivity[];
