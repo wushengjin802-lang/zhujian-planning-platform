@@ -30,7 +30,7 @@ from app.services.workbench import is_management_role, visible_project_ids
 
 PROJECT_STATUSES = ["建档中", "进行中", "已关闭", "已归档"]
 CONFIDENTIALITY_LEVELS = ["公开", "内部", "秘密", "机密"]
-INITIALIZATION_PACKAGE_VERSION = "v2.4"
+INITIALIZATION_PACKAGE_VERSION = "v2.5"
 DEFAULT_MILESTONES = [
     ("资料清点", "资料负责人", 1),
     ("事实确认", "咨询负责人", 2),
@@ -74,7 +74,7 @@ BUILTIN_REGION_RULES: list[dict[str, Any]] = [
         "name": "通用项目初始化规则",
         "region": "全国",
         "projectType": "通用",
-        "version": "v2.4",
+        "version": "v2.5",
         "status": "已发布",
         "description": "适用于未配置地区规则的项目，采用PDD一期通用资料、事实、章节和成果骨架。",
         "materials": [
@@ -96,7 +96,7 @@ BUILTIN_REGION_RULES: list[dict[str, Any]] = [
         "name": "政府投资项目规则",
         "region": "全国",
         "projectType": "政府投资",
-        "version": "v2.4",
+        "version": "v2.5",
         "status": "已发布",
         "description": "面向政府投资类项目，额外关注财政资金、立项依据、绩效目标和用地合规。",
         "materials": [
@@ -404,6 +404,39 @@ def preview_project_rule_migration(
     }
 
 
+def migration_rollback_impact(row: ProjectRuleMigrationPlan) -> dict[str, Any]:
+    """Describe what a rollback would and would not change.
+
+    A migration rollback restores the project template / region-rule pointers. It intentionally
+    does not delete initialization items that were added after the migration, so operators can
+    decide whether follow-up cleanup is required.
+    """
+    diff = row.diff or {}
+    sections = diff.get("sections") or {}
+    residual_items = 0
+    residual_by_section: dict[str, int] = {}
+    for key, section in sections.items():
+        added = section.get("added") or []
+        changed = section.get("changed") or []
+        count = len(added) + len(changed)
+        if count:
+            residual_by_section[key] = count
+            residual_items += count
+    if row.status == "已应用":
+        summary = f"预计保留 {residual_items} 个补齐项" if residual_items else "仅恢复规则指针"
+    elif row.status == "已回滚":
+        summary = "已回滚，补齐项保留"
+    else:
+        summary = "应用后可评估"
+    return {
+        "summary": summary,
+        "residualItems": residual_items,
+        "sections": residual_by_section,
+        "riskLevel": "中" if residual_items >= 5 else "低",
+        "note": "回滚只恢复项目模板/地区规则指针，不自动删除迁移期间补齐的资料、事实、章节或成果项。",
+    }
+
+
 def map_rule_migration_plan(row: ProjectRuleMigrationPlan) -> dict[str, Any]:
     diff = row.diff or {}
     approval = diff.get("approval") or {}
@@ -427,6 +460,7 @@ def map_rule_migration_plan(row: ProjectRuleMigrationPlan) -> dict[str, Any]:
         "approval": approval,
         "rejection": rejection,
         "rollback": rollback,
+        "rollbackImpact": migration_rollback_impact(row),
         "actions": actions,
         "createdBy": row.created_by,
         "appliedBy": row.applied_by,
@@ -961,6 +995,8 @@ def build_project_center(db: Session, user: dict[str, Any]) -> dict[str, Any]:
             "migrationApprovalFlow": True,
             "migrationRollback": True,
             "readonlyProjectBoundary": True,
+            "compactProjectCenterUi": True,
+            "migrationRollbackImpact": True,
         },
     }
 

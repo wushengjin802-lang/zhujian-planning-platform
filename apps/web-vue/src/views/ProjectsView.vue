@@ -83,6 +83,35 @@ const userOptions = computed(() => center.value?.users ?? []);
 const regionRuleOptions = computed(() => center.value?.regionRules ?? []);
 const draftOptions = computed(() => center.value?.wizardDrafts ?? []);
 
+const projectStageSteps = [
+  { no: 1, title: "项目建档", subtitle: "范围与权限" },
+  { no: 2, title: "资料清点", subtitle: "版本与完整性" },
+  { no: 3, title: "事实确认", subtitle: "统一数据底板" },
+  { no: 4, title: "章节编制", subtitle: "初稿与引用" },
+  { no: 5, title: "分析测算", subtitle: "GIS与投资" },
+  { no: 6, title: "专业复核", subtitle: "会签与门禁" },
+  { no: 7, title: "成果输出", subtitle: "发布与归档" }
+];
+
+const activeStageNo = computed(() => 1);
+
+const overviewMetricMeta: Record<string, { icon: string; color: string; order: number }> = {
+  total: { icon: "项", color: "#20a681", order: 1 },
+  active: { icon: "进", color: "#4a90ff", order: 2 },
+  notInitialized: { icon: "初", color: "#f5a623", order: 3 },
+  risk: { icon: "险", color: "#f05b5b", order: 4 },
+  gateBlocked: { icon: "禁", color: "#67c23a", order: 5 },
+  archived: { icon: "归", color: "#8b99aa", order: 6 }
+};
+
+const compactOverviewMetrics = computed(() => {
+  const metrics = center.value?.metrics ?? [];
+  return metrics
+    .filter((metric) => Object.prototype.hasOwnProperty.call(overviewMetricMeta, metric.key))
+    .sort((a, b) => overviewMetricMeta[a.key].order - overviewMetricMeta[b.key].order)
+    .map((metric) => ({ ...metric, ...overviewMetricMeta[metric.key] }));
+});
+
 function riskTag(risk?: string) {
   if (risk === "阻断") return "danger";
   if (risk === "严重") return "warning";
@@ -397,15 +426,28 @@ onMounted(() => reload());
   </div>
 
   <div v-loading="loading">
-    <div class="metric-grid" style="margin-bottom: 16px">
-      <el-card v-for="metric in center?.metrics ?? []" :key="metric.key" class="metric-card" shadow="never">
-        <div>
-          <span>{{ metric.label }}</span>
-          <strong>{{ metric.value }}</strong>
+    <el-card class="project-stage-card" shadow="never">
+      <div class="project-stage-flow">
+        <div v-for="step in projectStageSteps" :key="step.no" class="project-stage-item" :class="{ active: step.no === activeStageNo, passed: step.no < activeStageNo }">
+          <div class="stage-index">{{ step.no }}</div>
+          <div class="stage-title">{{ step.title }}</div>
+          <div class="stage-subtitle">{{ step.subtitle }}</div>
         </div>
-        <el-tag :type="metric.tone === 'danger' ? 'danger' : metric.tone === 'success' ? 'success' : metric.tone === 'primary' ? 'primary' : 'info'">{{ metric.key }}</el-tag>
-      </el-card>
-    </div>
+      </div>
+    </el-card>
+
+    <el-card class="overview-panel compact-overview" shadow="never">
+      <div class="overview-title">项目概览 <span>（所有项目）</span></div>
+      <div class="overview-metric-row">
+        <div v-for="metric in compactOverviewMetrics" :key="metric.key" class="overview-metric-card">
+          <div class="overview-metric-text">
+            <span>{{ metric.label }}</span>
+            <strong>{{ metric.value }}</strong>
+          </div>
+          <div class="overview-icon" :style="{ color: metric.color, background: `${metric.color}18` }">{{ metric.icon }}</div>
+        </div>
+      </div>
+    </el-card>
 
     <el-card class="panel" shadow="never" style="margin-bottom: 16px">
       <div class="toolbar" style="margin-bottom: 0">
@@ -630,7 +672,10 @@ onMounted(() => reload());
           <el-table :data="profile.migrationPlans ?? []" border empty-text="暂无迁移计划">
             <el-table-column prop="id" label="计划ID" width="190" />
             <el-table-column prop="status" label="状态" width="100" />
-            <el-table-column prop="riskLevel" label="风险" width="100" />
+            <el-table-column prop="riskLevel" label="风险" width="90" />
+            <el-table-column label="回滚影响" min-width="170"><template #default="scope">
+              <el-tag :type="scope.row.rollbackImpact?.riskLevel === '中' ? 'warning' : 'info'">{{ scope.row.rollbackImpact?.summary || '暂无影响' }}</el-tag>
+            </template></el-table-column>
             <el-table-column label="审批/回滚" min-width="220"><template #default="scope">
               <span v-if="scope.row.approval?.approvedBy">通过：{{ scope.row.approval.approvedBy }}</span>
               <span v-else-if="scope.row.rejection?.rejectedBy">驳回：{{ scope.row.rejection.rejectedBy }}</span>
@@ -728,3 +773,162 @@ onMounted(() => reload());
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+.project-stage-card {
+  margin-bottom: 10px;
+  border: 1px solid #e1e8ef;
+  border-radius: 4px;
+}
+
+.project-stage-card :deep(.el-card__body) {
+  padding: 14px 18px 12px;
+}
+
+.project-stage-flow {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(86px, 1fr));
+  align-items: start;
+  gap: 4px;
+}
+
+.project-stage-flow::before {
+  content: "";
+  position: absolute;
+  top: 13px;
+  left: 3.5%;
+  right: 3.5%;
+  height: 2px;
+  background: #d8e0e8;
+}
+
+.project-stage-item {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  min-width: 0;
+  color: #4d6276;
+  text-align: center;
+}
+
+.stage-index {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 8px;
+  place-items: center;
+  border: 2px solid #cdd7e2;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #8293a4;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.project-stage-item.active .stage-index,
+.project-stage-item.passed .stage-index {
+  border-color: #20a681;
+  background: #20a681;
+  color: #ffffff;
+  box-shadow: 0 3px 10px rgba(32, 166, 129, 0.22);
+}
+
+.stage-title {
+  color: #223548;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.project-stage-item.active .stage-title {
+  color: #118363;
+}
+
+.stage-subtitle {
+  margin-top: 5px;
+  color: #7d8b98;
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.overview-panel {
+  margin-bottom: 12px;
+  border: 1px solid #dfe8f0;
+  border-radius: 4px;
+}
+
+.overview-panel :deep(.el-card__body) {
+  padding: 12px 14px;
+}
+
+.overview-title {
+  margin-bottom: 10px;
+  color: #1f2d3d;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.overview-title span {
+  color: #8592a1;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.overview-metric-row {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(118px, 1fr));
+  gap: 12px;
+}
+
+.overview-metric-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 1px solid #e7edf3;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.overview-metric-text {
+  display: grid;
+  gap: 6px;
+}
+
+.overview-metric-text span {
+  color: #7a8794;
+  font-size: 12px;
+}
+
+.overview-metric-text strong {
+  color: #1c2f43;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.overview-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+@media (max-width: 1180px) {
+  .overview-metric-row {
+    grid-template-columns: repeat(3, minmax(150px, 1fr));
+  }
+
+  .project-stage-flow {
+    overflow-x: auto;
+    grid-template-columns: repeat(7, 120px);
+    padding-bottom: 4px;
+  }
+}
+</style>

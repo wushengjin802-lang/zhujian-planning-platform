@@ -22,7 +22,7 @@ from app.db.models import (
     ReportChapter,
     ReportTemplate,
 )
-from app.services.project_center import add_default_milestones, apply_rule_migration_plan, approve_rule_migration_plan, assert_project_writable, build_project_center, create_project_revision, create_rule_migration_plan, evaluate_project_status_gate, ensure_project_initialization_package, map_project_profile, preview_project_rule_migration, reject_rule_migration_plan, rollback_rule_migration_plan
+from app.services.project_center import add_default_milestones, apply_rule_migration_plan, approve_rule_migration_plan, assert_project_writable, build_project_center, create_project_revision, create_rule_migration_plan, evaluate_project_status_gate, ensure_project_initialization_package, map_project_profile, map_rule_migration_plan, preview_project_rule_migration, reject_rule_migration_plan, rollback_rule_migration_plan
 
 
 class ScalarRows:
@@ -143,7 +143,7 @@ class ProjectCenterTest(unittest.TestCase):
         project.archived_at = None
         db = FakeSession({Project: [project], ProjectMember: [], ProjectMilestone: [], ProjectMaterialRequirement: [], ProjectInitializationRecord: [], FactItem: [], ReportChapter: [], Artifact: []})
         summary = ensure_project_initialization_package(db, project, {"id": "U1", "name": "张工", "role": "项目负责人"})
-        self.assertEqual(summary["packageVersion"], "v2.4")
+        self.assertEqual(summary["packageVersion"], "v2.5")
         self.assertGreaterEqual(len(db.rows_by_model[ProjectMaterialRequirement]), 5)
         self.assertGreaterEqual(len(db.rows_by_model[FactItem]), 5)
         self.assertGreaterEqual(len(db.rows_by_model[ReportChapter]), 6)
@@ -231,6 +231,9 @@ class ProjectCenterTest(unittest.TestCase):
         self.assertTrue(preview["ruleChanged"])
         self.assertGreater(preview["impactCount"], 0)
         plan = create_rule_migration_plan(db, project, {"id": "U1", "name": "张工"}, "TPL-NEW", "v2.0", "BUILTIN-GOV-INVESTMENT")
+        mapped_before_apply = map_rule_migration_plan(plan)
+        self.assertIn("rollbackImpact", mapped_before_apply)
+        self.assertEqual(mapped_before_apply["rollbackImpact"]["summary"], "应用后可评估")
         self.assertEqual(plan.status, "待审批")
         approve_rule_migration_plan(db, plan, {"id": "U2", "name": "审核人"}, "同意迁移")
         self.assertEqual(plan.status, "已审批")

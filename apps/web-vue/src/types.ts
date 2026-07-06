@@ -178,6 +178,7 @@ export interface ProjectRuleMigrationPlan {
   approval?: Record<string, unknown>;
   rejection?: Record<string, unknown>;
   rollback?: Record<string, unknown>;
+  rollbackImpact?: { summary: string; residualItems: number; riskLevel: string; note?: string; sections?: Record<string, number> };
   actions?: { canApprove?: boolean; canReject?: boolean; canApply?: boolean; canRollback?: boolean; canViewDiff?: boolean };
   createdBy?: string | null;
   appliedBy?: string | null;

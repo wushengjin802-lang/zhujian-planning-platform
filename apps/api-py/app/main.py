@@ -60,7 +60,7 @@ from app.services.rag import generate_chapter_with_rag
 from app.services.storage import persist_upload, storage
 from app.worker.tasks import export_artifact_task, parse_document_task, quality_check_task
 
-app = FastAPI(title="住建项目策划平台 API", version="2.3.0")
+app = FastAPI(title="住建项目策划平台 API", version="2.5.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
