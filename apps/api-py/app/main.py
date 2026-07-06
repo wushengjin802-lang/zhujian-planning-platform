@@ -24,6 +24,7 @@ from app.db.models import (
     ParseJob,
     Project,
     ProjectDocument,
+    ProjectMilestone,
     QualityCheckJob,
     QualityIssue,
     QualityRule,
@@ -42,6 +43,7 @@ from app.services.artifacts import generate_artifact
 from app.services.auth import authenticate_user, get_session_user, logout_session
 from app.services.capabilities import platform_status
 from app.services.dashboard import build_dashboard
+from app.services.project_center import add_default_milestones, apply_project_defaults, build_project_center, can_change_status, ensure_project_member, generate_project_code, map_milestone, map_project_profile, map_project_summary
 from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, assert_review_approval_gate, is_management_role, map_task_event, map_workbench_event
 from app.services.documents import parse_document
 from app.services.estimates import calculate_estimate, confirm_estimate, get_estimate, map_estimate
@@ -52,7 +54,7 @@ from app.services.rag import generate_chapter_with_rag
 from app.services.storage import persist_upload, storage
 from app.worker.tasks import export_artifact_task, parse_document_task, quality_check_task
 
-app = FastAPI(title="住建项目策划平台 API", version="1.6.0")
+app = FastAPI(title="住建项目策划平台 API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -72,6 +74,56 @@ class ProjectCreate(BaseModel):
     type: str | None = None
     location: str | None = None
     owner: str | None = None
+    code: str | None = None
+    templateId: str | None = None
+    templateVersion: str | None = None
+    confidentiality: str | None = None
+    plannedStart: str | None = None
+    plannedEnd: str | None = None
+    description: str | None = None
+    members: list[dict] = []
+    milestones: list[dict] = []
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = None
+    type: str | None = None
+    location: str | None = None
+    owner: str | None = None
+    phase: str | None = None
+    progress: int | None = None
+    risk: str | None = None
+    templateId: str | None = None
+    templateVersion: str | None = None
+    confidentiality: str | None = None
+    plannedStart: str | None = None
+    plannedEnd: str | None = None
+    description: str | None = None
+
+
+class ProjectMemberInput(BaseModel):
+    userId: str
+    role: str = "项目成员"
+
+
+class ProjectMilestoneInput(BaseModel):
+    name: str
+    owner: str = "项目负责人"
+    status: str = "未开始"
+    dueAt: str | None = None
+    sortOrder: int | None = None
+
+
+class ProjectStatusAction(BaseModel):
+    status: str
+    reason: str | None = None
+
+
+class ProjectCopyAction(BaseModel):
+    name: str | None = None
+    copyMembers: bool = True
+    copyMilestones: bool = True
+    copySettings: bool = True
 
 
 class DocumentCreate(BaseModel):
@@ -814,35 +866,262 @@ def logout(db: Session = Depends(get_db), token: str | None = Depends(bearer_tok
     return {"ok": True}
 
 
+@app.get("/api/project-center")
+def project_center(db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    return build_project_center(db, user)
+
+
 @app.get("/api/projects")
-def list_projects(db: Session = Depends(get_db)) -> list[dict]:
-    return [map_project(row) for row in db.scalars(select(Project).order_by(Project.created_at, Project.id)).all()]
+def list_projects(db: Session = Depends(get_db), user: dict = Depends(current_user)) -> list[dict]:
+    return build_project_center(db, user)["projects"]
 
 
 @app.post("/api/projects", status_code=201)
-def create_project(payload: ProjectCreate, db: Session = Depends(get_db), _: dict = Depends(current_user)) -> dict:
+def create_project(payload: ProjectCreate, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    template = db.get(ReportTemplate, payload.templateId) if payload.templateId else None
     project = Project(
         id=f"P{int(time.time() * 1000)}",
         name=payload.name.strip(),
         type=payload.type or "可行性研究报告",
         location=payload.location or "待补充",
         phase="项目建档",
-        owner=payload.owner or "项目负责人",
-        progress=5,
+        owner=payload.owner or user.get("name") or "项目负责人",
+        code=payload.code or generate_project_code(db, payload.type),
+        status="建档中",
+        confidentiality=payload.confidentiality or "内部",
+        template_id=payload.templateId or (template.id if template else None),
+        template_version=payload.templateVersion or (template.version if template else None),
+        planned_start=payload.plannedStart,
+        planned_end=payload.plannedEnd,
+        description=payload.description,
+        progress=8,
         risk="一般",
+        archived_at=None,
     )
+    apply_project_defaults(project, template)
     db.add(project)
-    write_audit(db, "system", "create_project", "project", project.id, payload.model_dump())
+    # Add creator as project lead. Additional members from the wizard are optional.
+    ensure_project_member(db, project.id, user["id"], "项目负责人")
+    for member in payload.members:
+        user_id = member.get("userId")
+        if user_id:
+            ensure_project_member(db, project.id, user_id, member.get("role") or "项目成员")
+    if payload.milestones:
+        for index, item in enumerate(payload.milestones, start=1):
+            if not item.get("name"):
+                continue
+            db.add(ProjectMilestone(
+                id=f"PM-{project.id}-{index}",
+                project_id=project.id,
+                name=item.get("name"),
+                owner=item.get("owner") or project.owner,
+                status=item.get("status") or "未开始",
+                due_at=item.get("dueAt"),
+                completed_at=None,
+                sort_order=item.get("sortOrder") or index,
+            ))
+    else:
+        add_default_milestones(db, project)
+    write_audit(db, user["name"], "create_project", "project", project.id, payload.model_dump())
     db.commit()
-    return map_project(project)
+    return map_project_profile(db, project, user)
 
 
 @app.get("/api/projects/{project_id}")
-def get_project(project_id: str, db: Session = Depends(get_db)) -> dict:
+def get_project(project_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return map_project(project)
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return map_project_profile(db, project, user)
+
+
+@app.patch("/api/projects/{project_id}")
+def update_project(project_id: str, payload: ProjectUpdate, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可修改项目基本信息")
+    fields = payload.model_dump(exclude_none=True)
+    mapping = {"templateId": "template_id", "templateVersion": "template_version", "plannedStart": "planned_start", "plannedEnd": "planned_end"}
+    for key, value in fields.items():
+        attr = mapping.get(key, key)
+        setattr(project, attr, value)
+    if payload.progress is not None:
+        project.progress = max(0, min(100, payload.progress))
+    project.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "update_project", "project", project.id, fields)
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
+@app.post("/api/projects/{project_id}/members", status_code=201)
+def add_project_member(project_id: str, payload: ProjectMemberInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可维护成员")
+    if not db.get(AppUser, payload.userId):
+        raise HTTPException(status_code=404, detail="User not found")
+    member = ensure_project_member(db, project_id, payload.userId, payload.role)
+    project.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "upsert_project_member", "project", project_id, payload.model_dump())
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
+@app.delete("/api/projects/{project_id}/members/{user_id}")
+def remove_project_member(project_id: str, user_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可维护成员")
+    member = db.get(ProjectMember, {"project_id": project_id, "user_id": user_id})
+    if not member:
+        raise HTTPException(status_code=404, detail="Project member not found")
+    db.delete(member)
+    project.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "remove_project_member", "project", project_id, {"userId": user_id})
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
+@app.post("/api/projects/{project_id}/milestones", status_code=201)
+def add_project_milestone(project_id: str, payload: ProjectMilestoneInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    row = ProjectMilestone(
+        id=f"PM-{int(time.time() * 1000)}",
+        project_id=project_id,
+        name=payload.name.strip(),
+        owner=payload.owner,
+        status=payload.status,
+        due_at=payload.dueAt,
+        completed_at=datetime.now(timezone.utc) if payload.status == "已完成" else None,
+        sort_order=payload.sortOrder or len(db.scalars(select(ProjectMilestone).where(ProjectMilestone.project_id == project_id)).all()) + 1,
+    )
+    db.add(row)
+    project.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "add_project_milestone", "project", project_id, payload.model_dump())
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
+@app.patch("/api/projects/{project_id}/milestones/{milestone_id}")
+def update_project_milestone(project_id: str, milestone_id: str, payload: ProjectMilestoneInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    row = db.get(ProjectMilestone, milestone_id)
+    if not project or not row or row.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Project milestone not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    row.name = payload.name.strip()
+    row.owner = payload.owner
+    row.status = payload.status
+    row.due_at = payload.dueAt
+    row.sort_order = payload.sortOrder or row.sort_order
+    row.completed_at = datetime.now(timezone.utc) if payload.status == "已完成" else None
+    row.updated_at = datetime.now(timezone.utc)
+    project.updated_at = row.updated_at
+    write_audit(db, user["name"], "update_project_milestone", "project_milestone", milestone_id, payload.model_dump())
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
+@app.post("/api/projects/{project_id}/status")
+def change_project_status(project_id: str, payload: ProjectStatusAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可变更项目状态")
+    if not can_change_status(project, payload.status):
+        raise HTTPException(status_code=409, detail=f"当前状态不允许变更为 {payload.status}")
+    project.status = payload.status
+    if payload.status == "已归档":
+        project.archived_at = datetime.now(timezone.utc)
+    if payload.status == "已关闭":
+        project.phase = "项目关闭"
+    if payload.status == "已归档":
+        project.phase = "成果归档"
+    if payload.status == "进行中" and project.phase in {"项目关闭", "成果归档", "项目建档"}:
+        project.phase = "资料清点"
+    project.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "change_project_status", "project", project_id, payload.model_dump())
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
+@app.post("/api/projects/{project_id}/copy", status_code=201)
+def copy_project(project_id: str, payload: ProjectCopyAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    source = db.get(Project, project_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    clone = Project(
+        id=f"P{int(time.time() * 1000)}",
+        name=payload.name or f"{source.name}-复制",
+        type=source.type,
+        location=source.location,
+        phase="项目建档",
+        owner=user.get("name") or source.owner,
+        code=generate_project_code(db, source.type),
+        status="建档中",
+        confidentiality=source.confidentiality if payload.copySettings else "内部",
+        template_id=source.template_id if payload.copySettings else None,
+        template_version=source.template_version if payload.copySettings else None,
+        planned_start=None,
+        planned_end=None,
+        description=f"由 {source.name} 复制创建。",
+        progress=8,
+        risk="一般",
+        archived_at=None,
+    )
+    db.add(clone)
+    ensure_project_member(db, clone.id, user["id"], "项目负责人")
+    if payload.copyMembers:
+        for member in db.scalars(select(ProjectMember).where(ProjectMember.project_id == source.id)).all():
+            ensure_project_member(db, clone.id, member.user_id, member.role)
+    if payload.copyMilestones:
+        for index, milestone in enumerate(db.scalars(select(ProjectMilestone).where(ProjectMilestone.project_id == source.id).order_by(ProjectMilestone.sort_order)).all(), start=1):
+            db.add(ProjectMilestone(id=f"PM-{clone.id}-{index}", project_id=clone.id, name=milestone.name, owner=milestone.owner, status="未开始", due_at=None, completed_at=None, sort_order=index))
+    else:
+        add_default_milestones(db, clone)
+    write_audit(db, user["name"], "copy_project", "project", clone.id, {"sourceProjectId": project_id, **payload.model_dump()})
+    db.commit()
+    return map_project_profile(db, clone, user)
 
 
 @app.get("/api/projects/{project_id}/documents")
@@ -1112,7 +1391,25 @@ def write_audit(db: Session, actor: str, action: str, entity_type: str, entity_i
 
 
 def map_project(row: Project) -> dict:
-    return {"id": row.id, "name": row.name, "type": row.type, "location": row.location, "phase": row.phase, "owner": row.owner, "progress": row.progress, "risk": row.risk}
+    return {
+        "id": row.id,
+        "code": getattr(row, "code", None) or row.id,
+        "name": row.name,
+        "type": row.type,
+        "location": row.location,
+        "phase": row.phase,
+        "owner": row.owner,
+        "status": getattr(row, "status", None) or "进行中",
+        "confidentiality": getattr(row, "confidentiality", None) or "内部",
+        "templateId": getattr(row, "template_id", None),
+        "templateVersion": getattr(row, "template_version", None),
+        "plannedStart": getattr(row, "planned_start", None),
+        "plannedEnd": getattr(row, "planned_end", None),
+        "description": getattr(row, "description", None),
+        "progress": row.progress,
+        "risk": row.risk,
+        "archivedAt": row.archived_at.isoformat() if getattr(row, "archived_at", None) else None,
+    }
 
 
 def map_document(db: Session, row: ProjectDocument) -> dict:

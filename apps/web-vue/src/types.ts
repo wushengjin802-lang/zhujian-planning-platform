@@ -2,13 +2,120 @@ export type Severity = "阻断" | "严重" | "一般" | "提示";
 
 export interface Project {
   id: string;
+  code?: string;
   name: string;
   type: string;
   location: string;
   phase: string;
   owner: string;
+  status?: string;
+  confidentiality?: string;
+  templateId?: string | null;
+  templateVersion?: string | null;
+  plannedStart?: string | null;
+  plannedEnd?: string | null;
+  description?: string | null;
   progress: number;
   risk: Severity;
+  archivedAt?: string | null;
+}
+
+export interface ProjectMemberInfo {
+  projectId: string;
+  userId: string;
+  name: string;
+  email?: string | null;
+  department?: string | null;
+  userStatus?: string | null;
+  role: string;
+}
+
+export interface ProjectMilestoneInfo {
+  id: string;
+  projectId: string;
+  name: string;
+  owner: string;
+  status: "未开始" | "进行中" | "已完成" | "已逾期" | string;
+  dueAt?: string | null;
+  completedAt?: string | null;
+  sortOrder: number;
+}
+
+export interface ProjectStats {
+  documents: number;
+  parsedDocuments: number;
+  facts: number;
+  confirmedFacts: number;
+  chapters: number;
+  approvedChapters: number;
+  openIssues: number;
+  blockingIssues: number;
+  artifacts: number;
+  generatedArtifacts: number;
+  members: number;
+  milestones: number;
+  completedMilestones: number;
+}
+
+export interface ProjectInitialization {
+  hasMembers: boolean;
+  hasMilestones: boolean;
+  hasTemplate: boolean;
+  hasDocuments: boolean;
+  ready: boolean;
+}
+
+export interface ProjectSummary extends Project {
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  stats: ProjectStats;
+  initialization: ProjectInitialization;
+}
+
+export interface ProjectProfile extends ProjectSummary {
+  members: ProjectMemberInfo[];
+  milestones: ProjectMilestoneInfo[];
+  actions?: {
+    canEdit?: boolean;
+    canClose?: boolean;
+    canArchive?: boolean;
+    canReopen?: boolean;
+    canCopy?: boolean;
+  };
+}
+
+export interface ProjectCenterMetric {
+  key: string;
+  label: string;
+  value: number;
+  tone: DashboardTone;
+}
+
+export interface ProjectCenterPayload {
+  generatedAt: string;
+  metrics: ProjectCenterMetric[];
+  projects: ProjectSummary[];
+  templates: Array<{ id: string; name: string; reportType: string; version: string; status: string }>;
+  users: AppUser[];
+  statuses: string[];
+  confidentialityLevels: string[];
+  capabilities: Record<string, boolean>;
+}
+
+export interface ProjectCreateInput {
+  name: string;
+  type?: string;
+  location?: string;
+  owner?: string;
+  code?: string;
+  templateId?: string;
+  templateVersion?: string;
+  confidentiality?: string;
+  plannedStart?: string;
+  plannedEnd?: string;
+  description?: string;
+  members?: Array<{ userId: string; role: string }>;
+  milestones?: Array<{ name: string; owner?: string; status?: string; dueAt?: string; sortOrder?: number }>;
 }
 
 export interface ProjectDocument {

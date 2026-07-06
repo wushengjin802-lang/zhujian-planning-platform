@@ -16,11 +16,35 @@ class Project(Base):
     location: Mapped[str] = mapped_column(Text)
     phase: Mapped[str] = mapped_column(Text)
     owner: Mapped[str] = mapped_column(Text)
+    code: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(Text)
+    confidentiality: Mapped[str | None] = mapped_column(Text)
+    template_id: Mapped[str | None] = mapped_column(Text)
+    template_version: Mapped[str | None] = mapped_column(Text)
+    planned_start: Mapped[str | None] = mapped_column(Text)
+    planned_end: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
     progress: Mapped[int] = mapped_column(Integer)
     risk: Mapped[str] = mapped_column(Text)
+    archived_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
+
+
+class ProjectMilestone(Base):
+    __tablename__ = "project_milestones"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(Text)
+    owner: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'未开始'"))
+    due_at: Mapped[str | None] = mapped_column(Text)
+    completed_at: Mapped[datetime | None]
+    sort_order: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 class ProjectDocument(Base):
     __tablename__ = "project_documents"

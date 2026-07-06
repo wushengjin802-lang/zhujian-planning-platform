@@ -1,4 +1,4 @@
-import type { AppUser, Artifact, BootstrapPayload, DashboardNotification, DashboardPayload, FactItem, InvestmentEstimate, NotificationSubscription, PlatformStatus, Project, ProjectDocument, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
+import type { AppUser, Artifact, BootstrapPayload, DashboardNotification, DashboardPayload, FactItem, InvestmentEstimate, NotificationSubscription, PlatformStatus, Project, ProjectCenterPayload, ProjectCreateInput, ProjectDocument, ProjectProfile, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
 
 const tokenKey = "zhujian.sessionToken";
 
@@ -58,8 +58,44 @@ export async function logout() {
   }
 }
 
-export function createProject(input: { name: string; type?: string; location?: string; owner?: string }) {
-  return request<Project>("/api/projects", { method: "POST", body: JSON.stringify(input) });
+export function loadProjectCenter() {
+  return request<ProjectCenterPayload>("/api/project-center");
+}
+
+export function loadProjectProfile(projectId: string) {
+  return request<ProjectProfile>(`/api/projects/${projectId}`);
+}
+
+export function createProject(input: ProjectCreateInput) {
+  return request<ProjectProfile>("/api/projects", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateProject(projectId: string, input: Partial<ProjectCreateInput> & { phase?: string; progress?: number; risk?: string }) {
+  return request<ProjectProfile>(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export function addProjectMember(projectId: string, input: { userId: string; role: string }) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/members`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function removeProjectMember(projectId: string, userId: string) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/members/${userId}`, { method: "DELETE" });
+}
+
+export function addProjectMilestone(projectId: string, input: { name: string; owner?: string; status?: string; dueAt?: string; sortOrder?: number }) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/milestones`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateProjectMilestone(projectId: string, milestoneId: string, input: { name: string; owner?: string; status?: string; dueAt?: string; sortOrder?: number }) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/milestones/${milestoneId}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export function changeProjectStatus(projectId: string, status: string, reason?: string) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/status`, { method: "POST", body: JSON.stringify({ status, reason }) });
+}
+
+export function copyProject(projectId: string, input: { name?: string; copyMembers?: boolean; copyMilestones?: boolean; copySettings?: boolean }) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/copy`, { method: "POST", body: JSON.stringify(input) });
 }
 
 export function createDocument(projectId: string, input: { name: string; category?: string; version?: string; source?: string }) {
