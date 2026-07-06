@@ -1,0 +1,7 @@
+npm error Lifecycle script `dev` failed with error:
+npm error code 4294967295
+npm error path D:\12_其他项目\27_FreeCAD\方案设计\zhujian-planning-platform\apps\web-vue
+npm error workspace @zhujian/web-vue@1.6.0
+npm error location D:\12_其他项目\27_FreeCAD\方案设计\zhujian-planning-platform\apps\web-vue
+npm error command failed
+npm error command C:\Windows\system32\cmd.exe /d /s /c vite --host 0.0.0.0

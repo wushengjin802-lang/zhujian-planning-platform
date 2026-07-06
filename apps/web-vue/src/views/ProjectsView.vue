@@ -12,6 +12,8 @@ import {
   loadProjectCenter,
   loadProjectProfile,
   loadProjectStatusGate,
+  saveProjectDraft,
+  deleteProjectDraft,
   removeProjectMember,
   updateProject,
   updateProjectMaterial,
@@ -26,6 +28,7 @@ const profile = ref<ProjectProfile | null>(null);
 const drawerOpen = ref(false);
 const activeTab = ref("profile");
 const wizardStep = ref(0);
+const currentDraftId = ref<string | undefined>();
 
 const filters = reactive({ keyword: "", status: "", risk: "" });
 const memberForm = reactive({ userId: "", role: "项目成员" });
@@ -41,6 +44,8 @@ const form = reactive<ProjectCreateInput & { open: boolean }>({
   confidentiality: "内部",
   templateId: "",
   templateVersion: "",
+  region: "全国",
+  regionRuleId: "BUILTIN-COMMON",
   plannedStart: "",
   plannedEnd: "",
   description: "",
@@ -65,6 +70,8 @@ const filteredProjects = computed(() => {
 const selectedSummary = computed(() => center.value?.projects.find((item) => item.id === profile.value?.id));
 const templateOptions = computed(() => center.value?.templates ?? []);
 const userOptions = computed(() => center.value?.users ?? []);
+const regionRuleOptions = computed(() => center.value?.regionRules ?? []);
+const draftOptions = computed(() => center.value?.wizardDrafts ?? []);
 
 function riskTag(risk?: string) {
   if (risk === "阻断") return "danger";
@@ -130,6 +137,9 @@ function resetWizard() {
   form.confidentiality = "内部";
   form.templateId = templateOptions.value[0]?.id || "";
   form.templateVersion = templateOptions.value[0]?.version || "";
+  form.region = "全国";
+  form.regionRuleId = regionRuleOptions.value[0]?.id || "BUILTIN-COMMON";
+  currentDraftId.value = undefined;
   form.plannedStart = "";
   form.plannedEnd = "";
   form.description = "";
@@ -139,6 +149,34 @@ function resetWizard() {
 function bindSelectedTemplate() {
   const tpl = templateOptions.value.find((item) => item.id === form.templateId);
   form.templateVersion = tpl?.version || "";
+}
+
+function bindSelectedRegionRule() {
+  const rule = regionRuleOptions.value.find((item) => item.id === form.regionRuleId);
+  form.region = rule?.region || form.region || "全国";
+}
+
+async function saveWizardDraft() {
+  const draft = await saveProjectDraft({ id: currentDraftId.value, name: form.name || "未命名项目草稿", step: wizardStep.value, payload: { ...form, open: undefined } as ProjectCreateInput });
+  currentDraftId.value = draft.id;
+  await reload();
+  form.open = true;
+  ElMessage.success("建档草稿已保存");
+}
+
+function loadWizardDraft(draftId: string) {
+  const draft = draftOptions.value.find((item) => item.id === draftId);
+  if (!draft) return;
+  Object.assign(form, { ...draft.payload, open: true });
+  currentDraftId.value = draft.id;
+  wizardStep.value = draft.step || 0;
+  ElMessage.success("已载入建档草稿");
+}
+
+async function removeWizardDraft(draftId: string) {
+  await deleteProjectDraft(draftId);
+  await reload();
+  ElMessage.success("建档草稿已删除");
 }
 
 function addWizardMember() {
@@ -153,7 +191,7 @@ async function submitWizard() {
     ElMessage.warning("请输入项目名称");
     return;
   }
-  const created = await createProject(form);
+  const created = await createProject({ ...form, draftId: currentDraftId.value });
   form.open = false;
   await store.refresh();
   await reload(created.id);
@@ -173,6 +211,8 @@ async function saveProfile() {
     confidentiality: profile.value.confidentiality || "内部",
     templateId: profile.value.templateId || undefined,
     templateVersion: profile.value.templateVersion || undefined,
+    region: profile.value.region || undefined,
+    regionRuleId: profile.value.regionRuleId || undefined,
     plannedStart: profile.value.plannedStart || undefined,
     plannedEnd: profile.value.plannedEnd || undefined,
     description: profile.value.description || undefined
@@ -354,6 +394,8 @@ onMounted(() => reload());
               <el-col :span="12"><el-form-item label="计划完成"><el-input v-model="profile.plannedEnd" placeholder="YYYY-MM-DD" /></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="模板"><el-select v-model="profile.templateId" clearable><el-option v-for="tpl in templateOptions" :key="tpl.id" :label="`${tpl.name} ${tpl.version}`" :value="tpl.id" /></el-select></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="模板版本"><el-input v-model="profile.templateVersion" /></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="地区"><el-input v-model="profile.region" /></el-form-item></el-col>
+              <el-col :span="12"><el-form-item label="地区/初始化规则"><el-select v-model="profile.regionRuleId" filterable clearable><el-option v-for="rule in regionRuleOptions" :key="rule.id" :label="`${rule.name}｜${rule.region}｜${rule.version}`" :value="rule.id" /></el-select></el-form-item></el-col>
               <el-col :span="24"><el-form-item label="项目说明"><el-input v-model="profile.description" type="textarea" :rows="3" /></el-form-item></el-col>
             </el-row>
           </el-form>
@@ -495,6 +537,8 @@ onMounted(() => reload());
           <el-col :span="12"><el-form-item label="报告模板"><el-select v-model="form.templateId" clearable @change="bindSelectedTemplate"><el-option v-for="tpl in templateOptions" :key="tpl.id" :label="`${tpl.name} ${tpl.version}`" :value="tpl.id" /></el-select></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="模板版本"><el-input v-model="form.templateVersion" /></el-form-item></el-col>
           <el-col :span="12"><el-form-item label="项目密级"><el-select v-model="form.confidentiality"><el-option v-for="level in center?.confidentialityLevels ?? []" :key="level" :label="level" :value="level" /></el-select></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="地区"><el-input v-model="form.region" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="地区/初始化规则"><el-select v-model="form.regionRuleId" filterable @change="bindSelectedRegionRule"><el-option v-for="rule in regionRuleOptions" :key="rule.id" :label="`${rule.name}｜${rule.region}｜${rule.version}`" :value="rule.id" /></el-select></el-form-item></el-col>
           <el-col :span="24"><el-form-item label="项目说明"><el-input v-model="form.description" type="textarea" :rows="3" /></el-form-item></el-col>
         </el-row>
       </template>
@@ -512,6 +556,7 @@ onMounted(() => reload());
     </el-form>
     <template #footer>
       <el-button @click="form.open = false">取消</el-button>
+      <el-button @click="saveWizardDraft">保存草稿</el-button>
       <el-button :disabled="wizardStep === 0" @click="wizardStep--">上一步</el-button>
       <el-button v-if="wizardStep < 2" type="primary" @click="wizardStep++">下一步</el-button>
       <el-button v-else type="primary" @click="submitWizard">创建项目</el-button>

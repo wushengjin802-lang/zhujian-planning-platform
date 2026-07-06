@@ -13,6 +13,8 @@ from app.db.models import (
     FactItem,
     Project,
     ProjectDocument,
+    ProjectRegionRule,
+    ProjectWizardDraft,
     ProjectInitializationRecord,
     ProjectMaterialRequirement,
     ProjectMember,
@@ -26,7 +28,7 @@ from app.services.workbench import is_management_role, visible_project_ids
 
 PROJECT_STATUSES = ["建档中", "进行中", "已关闭", "已归档"]
 CONFIDENTIALITY_LEVELS = ["公开", "内部", "秘密", "机密"]
-INITIALIZATION_PACKAGE_VERSION = "v2.1"
+INITIALIZATION_PACKAGE_VERSION = "v2.2"
 DEFAULT_MILESTONES = [
     ("资料清点", "资料负责人", 1),
     ("事实确认", "咨询负责人", 2),
@@ -62,6 +64,61 @@ DEFAULT_ARTIFACT_PLAN = [
     ("事实与质量清单.xlsx", "Excel"),
     ("汇报简版.pptx", "PPT"),
     ("项目归档包.zip", "Archive"),
+]
+
+BUILTIN_REGION_RULES: list[dict[str, Any]] = [
+    {
+        "id": "BUILTIN-COMMON",
+        "name": "通用项目初始化规则",
+        "region": "全国",
+        "projectType": "通用",
+        "version": "v2.2",
+        "status": "已发布",
+        "description": "适用于未配置地区规则的项目，采用PDD一期通用资料、事实、章节和成果骨架。",
+        "materials": [
+            {"category": c, "name": n, "required": r, "sortOrder": o} for c, n, r, o in DEFAULT_MATERIAL_REQUIREMENTS
+        ],
+        "facts": [
+            {"group": g, "name": n, "value": v, "unit": u, "source": src, "status": st} for g, n, v, u, src, st in DEFAULT_FACT_FRAME
+        ],
+        "chapters": [
+            {"no": no, "title": title, "owner": owner, "sortOrder": order} for no, title, owner, order in DEFAULT_CHAPTER_OUTLINE
+        ],
+        "artifacts": [
+            {"name": name, "format": fmt} for name, fmt in DEFAULT_ARTIFACT_PLAN
+        ],
+        "settings": {"requiresRegionCheck": False, "requiresSpecialMaterial": False},
+    },
+    {
+        "id": "BUILTIN-GOV-INVESTMENT",
+        "name": "政府投资项目规则",
+        "region": "全国",
+        "projectType": "政府投资",
+        "version": "v2.2",
+        "status": "已发布",
+        "description": "面向政府投资类项目，额外关注财政资金、立项依据、绩效目标和用地合规。",
+        "materials": [
+            {"category": c, "name": n, "required": r, "sortOrder": o} for c, n, r, o in DEFAULT_MATERIAL_REQUIREMENTS
+        ] + [
+            {"category": "财政资料", "name": "财政资金来源或资金平衡说明", "required": True, "sortOrder": 20},
+            {"category": "绩效资料", "name": "绩效目标或建设效益说明", "required": False, "sortOrder": 21},
+        ],
+        "facts": [
+            {"group": g, "name": n, "value": v, "unit": u, "source": src, "status": st} for g, n, v, u, src, st in DEFAULT_FACT_FRAME
+        ] + [
+            {"group": "资金来源", "name": "财政资金比例", "value": "", "unit": "%", "source": "待补充", "status": "待确认"},
+            {"group": "审批合规", "name": "立项审批依据", "value": "", "unit": None, "source": "待补充", "status": "待确认"},
+        ],
+        "chapters": [
+            {"no": no, "title": title, "owner": owner, "sortOrder": order} for no, title, owner, order in DEFAULT_CHAPTER_OUTLINE
+        ] + [
+            {"no": "7", "title": "财政承受能力与绩效目标", "owner": "投资负责人", "sortOrder": 7},
+        ],
+        "artifacts": [
+            {"name": name, "format": fmt} for name, fmt in DEFAULT_ARTIFACT_PLAN
+        ] + [{"name": "政府投资合规清单.xlsx", "format": "Excel"}],
+        "settings": {"requiresRegionCheck": True, "requiresSpecialMaterial": True},
+    },
 ]
 RUNNING_PARSE_STATUSES = {"queued", "running", "解析中", "待处理"}
 RUNNING_QUALITY_STATUSES = {"queued", "running", "检查中", "待处理"}
@@ -189,6 +246,116 @@ def map_initialization_record(row: ProjectInitializationRecord) -> dict[str, Any
     }
 
 
+def map_project_draft(row: ProjectWizardDraft) -> dict[str, Any]:
+    payload = row.payload or {}
+    return {
+        "id": row.id,
+        "name": row.name,
+        "step": row.step,
+        "status": row.status,
+        "payload": payload,
+        "projectName": payload.get("name") or row.name,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def map_region_rule(row: ProjectRegionRule | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "region": row.get("region"),
+            "projectType": row.get("projectType"),
+            "version": row.get("version"),
+            "status": row.get("status", "已发布"),
+            "description": row.get("description"),
+            "materials": row.get("materials", []),
+            "facts": row.get("facts", []),
+            "chapters": row.get("chapters", []),
+            "artifacts": row.get("artifacts", []),
+            "settings": row.get("settings", {}),
+            "builtin": True,
+        }
+    return {
+        "id": row.id,
+        "name": row.name,
+        "region": row.region,
+        "projectType": row.project_type,
+        "version": row.version,
+        "status": row.status,
+        "description": row.description,
+        "materials": row.materials or [],
+        "facts": row.facts or [],
+        "chapters": row.chapters or [],
+        "artifacts": row.artifacts or [],
+        "settings": row.settings or {},
+        "builtin": False,
+    }
+
+
+def list_region_rules(db: Session) -> list[dict[str, Any]]:
+    fake = _rows(db, ProjectRegionRule)
+    db_rules = fake if fake is not None else db.scalars(select(ProjectRegionRule).where(ProjectRegionRule.status != "已停用").order_by(ProjectRegionRule.region, ProjectRegionRule.name)).all()
+    rows = [map_region_rule(rule) for rule in db_rules if getattr(rule, "status", "已发布") != "已停用"]
+    seen = {item["id"] for item in rows}
+    rows.extend(map_region_rule(rule) for rule in BUILTIN_REGION_RULES if rule["id"] not in seen)
+    return rows
+
+
+def get_region_rule_config(db: Session, rule_id: str | None) -> dict[str, Any]:
+    rules = list_region_rules(db)
+    if rule_id:
+        match = next((rule for rule in rules if rule["id"] == rule_id), None)
+        if match:
+            return match
+    return next(rule for rule in rules if rule["id"] == "BUILTIN-COMMON")
+
+
+def _project_initialization_blueprint(db: Session, project: Project) -> dict[str, list[dict[str, Any]] | dict[str, Any] | str | None]:
+    rule = get_region_rule_config(db, getattr(project, "region_rule_id", None))
+    return {
+        "ruleId": rule["id"],
+        "ruleName": rule["name"],
+        "ruleVersion": rule.get("version"),
+        "materials": rule.get("materials") or [],
+        "facts": rule.get("facts") or [],
+        "chapters": rule.get("chapters") or [],
+        "artifacts": rule.get("artifacts") or [],
+        "settings": rule.get("settings") or {},
+    }
+
+
+def list_project_drafts(db: Session, user: dict[str, Any]) -> list[dict[str, Any]]:
+    fake = _rows(db, ProjectWizardDraft)
+    rows = fake if fake is not None else db.scalars(select(ProjectWizardDraft).where(ProjectWizardDraft.user_id == user.get("id"), ProjectWizardDraft.status == "草稿").order_by(ProjectWizardDraft.updated_at.desc(), ProjectWizardDraft.id.desc())).all()
+    return [map_project_draft(row) for row in rows if row.user_id == user.get("id") and row.status == "草稿"]
+
+
+def upsert_project_draft(db: Session, user: dict[str, Any], payload: dict[str, Any], draft_id: str | None = None, step: int = 0, name: str | None = None) -> ProjectWizardDraft:
+    row = db.get(ProjectWizardDraft, draft_id) if draft_id and not getattr(db, "rows_by_model", None) else None
+    fake = _rows(db, ProjectWizardDraft)
+    if fake is not None and draft_id:
+        row = next((item for item in fake if item.id == draft_id and item.user_id == user.get("id")), None)
+    if not row:
+        row = ProjectWizardDraft(
+            id=draft_id or f"PWD-{int(time.time() * 1000)}",
+            user_id=user.get("id"),
+            name=name or payload.get("name") or "未命名项目草稿",
+            step=step,
+            status="草稿",
+            payload=payload,
+        )
+        db.add(row)
+    else:
+        row.name = name or payload.get("name") or row.name
+        row.step = step
+        row.payload = payload
+        row.status = "草稿"
+        row.updated_at = now_utc()
+    return row
+
+
 def _initialization_records(db: Session, project_id: str) -> list[ProjectInitializationRecord]:
     rows = _filter_project_rows(db, ProjectInitializationRecord, project_id)
     return sorted(rows, key=lambda item: getattr(item, "created_at", None) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
@@ -283,6 +450,10 @@ def map_project_summary(db: Session, project: Project) -> dict[str, Any]:
         "confidentiality": project_confidentiality(project),
         "templateId": getattr(project, "template_id", None),
         "templateVersion": getattr(project, "template_version", None),
+        "region": getattr(project, "region", None),
+        "regionRuleId": getattr(project, "region_rule_id", None),
+        "initializationRuleVersion": getattr(project, "initialization_rule_version", None),
+        "draftSourceId": getattr(project, "draft_source_id", None),
         "plannedStart": getattr(project, "planned_start", None),
         "plannedEnd": getattr(project, "planned_end", None),
         "description": getattr(project, "description", None),
@@ -365,12 +536,15 @@ def build_project_center(db: Session, user: dict[str, Any]) -> dict[str, Any]:
     users = _rows(db, AppUser)
     if users is None:
         users = db.scalars(select(AppUser).order_by(AppUser.id)).all()
+    region_rules = list_region_rules(db)
+    drafts = list_project_drafts(db, user)
     return {
         "generatedAt": now_utc().isoformat(),
         "metrics": [
             {"key": "total", "label": "项目总数", "value": len(summaries), "tone": "primary"},
             {"key": "active", "label": "进行中", "value": len(active), "tone": "success"},
             {"key": "notInitialized", "label": "待初始化", "value": len(not_initialized), "tone": "warning" if not_initialized else "success"},
+            {"key": "drafts", "label": "建档草稿", "value": len(drafts), "tone": "warning" if drafts else "info"},
             {"key": "gateBlocked", "label": "门禁阻断", "value": len(gate_blocked), "tone": "danger" if gate_blocked else "success"},
             {"key": "risk", "label": "高风险", "value": len(risk_items), "tone": "danger" if risk_items else "info"},
             {"key": "archived", "label": "已归档", "value": len(archived), "tone": "info"},
@@ -382,6 +556,8 @@ def build_project_center(db: Session, user: dict[str, Any]) -> dict[str, Any]:
             if row.status != "已停用"
         ],
         "users": [_map_user(row) for row in users if row.status == "启用"],
+        "regionRules": region_rules,
+        "wizardDrafts": drafts,
         "statuses": PROJECT_STATUSES,
         "confidentialityLevels": CONFIDENTIALITY_LEVELS,
         "capabilities": {
@@ -398,6 +574,9 @@ def build_project_center(db: Session, user: dict[str, Any]) -> dict[str, Any]:
             "materialChecklist": True,
             "statusGate": True,
             "archiveGate": True,
+            "wizardDraft": True,
+            "regionRuleBinding": True,
+            "templateDrivenInitialization": True,
         },
     }
 
@@ -458,45 +637,52 @@ def ensure_project_initialization_package(db: Session, project: Project, user: d
     if user and user.get("id") and not _filter_project_rows(db, ProjectMember, project.id):
         ensure_project_member(db, project.id, user["id"], "项目负责人")
     add_default_milestones(db, project)
+    blueprint = _project_initialization_blueprint(db, project)
     created: dict[str, int] = {"materials": 0, "facts": 0, "chapters": 0, "artifacts": 0}
-    for category, name, required, order in DEFAULT_MATERIAL_REQUIREMENTS:
+
+    for index, item in enumerate(blueprint["materials"], start=1):
+        name = item.get("name") or "未命名资料"
         if not _existing_by_name(db, ProjectMaterialRequirement, project.id, "name", name):
             row = ProjectMaterialRequirement(
-                id=f"PMR-{project.id}-{order}",
+                id=f"PMR-{project.id}-{item.get('sortOrder') or index}",
                 project_id=project.id,
-                category=category,
+                category=item.get("category") or "项目资料",
                 name=name,
-                required=required,
+                required=bool(item.get("required", True)),
                 status="待上传",
                 source_type=None,
                 source_id=None,
-                sort_order=order,
+                sort_order=int(item.get("sortOrder") or index),
             )
             db.add(row)
             created["materials"] += 1
-    for index, (group, name, value, unit, source, status) in enumerate(DEFAULT_FACT_FRAME, start=1):
+
+    for index, item in enumerate(blueprint["facts"], start=1):
+        name = item.get("name") or "未命名事实"
         if not _existing_by_name(db, FactItem, project.id, "name", name):
             row = FactItem(
                 id=f"FI-{project.id}-{index}",
                 project_id=project.id,
-                fact_group=group,
+                fact_group=item.get("group") or item.get("factGroup") or "项目事实",
                 name=name,
-                value=value,
-                unit=unit,
-                source=source,
+                value=item.get("value") or "",
+                unit=item.get("unit"),
+                source=item.get("source") or "待补充",
                 owner=project.owner,
-                status=status,
+                status=item.get("status") or "待确认",
             )
             db.add(row)
             created["facts"] += 1
-    for no, title, owner, order in DEFAULT_CHAPTER_OUTLINE:
+
+    for index, item in enumerate(blueprint["chapters"], start=1):
+        no = str(item.get("no") or index)
         if not _existing_by_name(db, ReportChapter, project.id, "chapter_no", no):
             row = ReportChapter(
-                id=f"RC-{project.id}-{order}",
+                id=f"RC-{project.id}-{item.get('sortOrder') or index}",
                 project_id=project.id,
                 chapter_no=no,
-                title=title,
-                owner=owner,
+                title=item.get("title") or f"第{index}章",
+                owner=item.get("owner") or "报告负责人",
                 status="未开始",
                 citation_count=0,
                 quality="提示",
@@ -504,13 +690,15 @@ def ensure_project_initialization_package(db: Session, project: Project, user: d
             )
             db.add(row)
             created["chapters"] += 1
-    for index, (name, fmt) in enumerate(DEFAULT_ARTIFACT_PLAN, start=1):
+
+    for index, item in enumerate(blueprint["artifacts"], start=1):
+        name = item.get("name") or f"成果{index}"
         if not _existing_by_name(db, Artifact, project.id, "name", name):
             row = Artifact(
                 id=f"ART-{project.id}-{index}",
                 project_id=project.id,
                 name=name,
-                format=fmt,
+                format=item.get("format") or "Word",
                 status="可生成",
                 updated_at=current_day(),
                 storage_path=None,
@@ -519,7 +707,21 @@ def ensure_project_initialization_package(db: Session, project: Project, user: d
             )
             db.add(row)
             created["artifacts"] += 1
-    summary = {"packageVersion": INITIALIZATION_PACKAGE_VERSION, "created": created}
+    project.region_rule_id = getattr(project, "region_rule_id", None) or blueprint.get("ruleId")
+    project.initialization_rule_version = str(blueprint.get("ruleVersion") or INITIALIZATION_PACKAGE_VERSION)
+    summary = {
+        "packageVersion": INITIALIZATION_PACKAGE_VERSION,
+        "ruleId": blueprint.get("ruleId"),
+        "ruleName": blueprint.get("ruleName"),
+        "ruleVersion": blueprint.get("ruleVersion"),
+        "created": created,
+        "expected": {
+            "materials": len(blueprint["materials"]),
+            "facts": len(blueprint["facts"]),
+            "chapters": len(blueprint["chapters"]),
+            "artifacts": len(blueprint["artifacts"]),
+        },
+    }
     record = ProjectInitializationRecord(
         id=f"PIR-{project.id}-{int(time.time() * 1000)}",
         project_id=project.id,

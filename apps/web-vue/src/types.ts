@@ -12,6 +12,10 @@ export interface Project {
   confidentiality?: string;
   templateId?: string | null;
   templateVersion?: string | null;
+  region?: string | null;
+  regionRuleId?: string | null;
+  initializationRuleVersion?: string | null;
+  draftSourceId?: string | null;
   plannedStart?: string | null;
   plannedEnd?: string | null;
   description?: string | null;
@@ -153,6 +157,34 @@ export interface ProjectProfile extends ProjectSummary {
   };
 }
 
+
+export interface ProjectRegionRule {
+  id: string;
+  name: string;
+  region?: string | null;
+  projectType?: string | null;
+  version?: string | null;
+  status?: string | null;
+  description?: string | null;
+  materials?: Array<Record<string, unknown>>;
+  facts?: Array<Record<string, unknown>>;
+  chapters?: Array<Record<string, unknown>>;
+  artifacts?: Array<Record<string, unknown>>;
+  settings?: Record<string, unknown>;
+  builtin?: boolean;
+}
+
+export interface ProjectWizardDraft {
+  id: string;
+  name: string;
+  step: number;
+  status: string;
+  payload: ProjectCreateInput;
+  projectName?: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
 export interface ProjectCenterMetric {
   key: string;
   label: string;
@@ -166,6 +198,8 @@ export interface ProjectCenterPayload {
   projects: ProjectSummary[];
   templates: Array<{ id: string; name: string; reportType: string; version: string; status: string }>;
   users: AppUser[];
+  regionRules?: ProjectRegionRule[];
+  wizardDrafts?: ProjectWizardDraft[];
   statuses: string[];
   confidentialityLevels: string[];
   capabilities: Record<string, boolean>;
@@ -179,6 +213,9 @@ export interface ProjectCreateInput {
   code?: string;
   templateId?: string;
   templateVersion?: string;
+  region?: string;
+  regionRuleId?: string;
+  draftId?: string;
   confidentiality?: string;
   plannedStart?: string;
   plannedEnd?: string;

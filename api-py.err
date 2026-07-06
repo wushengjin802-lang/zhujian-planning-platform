@@ -5,3 +5,7 @@ INFO:     Started server process [26044]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 WARNING:  WatchFiles detected changes in 'alembic\versions\20260706_0006_project_center_v20.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [26044]

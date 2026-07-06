@@ -21,6 +21,10 @@ class Project(Base):
     confidentiality: Mapped[str | None] = mapped_column(Text)
     template_id: Mapped[str | None] = mapped_column(Text)
     template_version: Mapped[str | None] = mapped_column(Text)
+    region: Mapped[str | None] = mapped_column(Text)
+    region_rule_id: Mapped[str | None] = mapped_column(Text)
+    initialization_rule_version: Mapped[str | None] = mapped_column(Text)
+    draft_source_id: Mapped[str | None] = mapped_column(Text)
     planned_start: Mapped[str | None] = mapped_column(Text)
     planned_end: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
@@ -30,6 +34,38 @@ class Project(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
+
+
+class ProjectWizardDraft(Base):
+    __tablename__ = "project_wizard_drafts"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("app_users.id", ondelete="SET NULL"))
+    name: Mapped[str] = mapped_column(Text)
+    step: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'草稿'"))
+    payload: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class ProjectRegionRule(Base):
+    __tablename__ = "project_region_rules"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text)
+    region: Mapped[str] = mapped_column(Text)
+    project_type: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'已发布'"))
+    description: Mapped[str | None] = mapped_column(Text)
+    materials: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    facts: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    chapters: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    artifacts: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    settings: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 
 class ProjectMilestone(Base):

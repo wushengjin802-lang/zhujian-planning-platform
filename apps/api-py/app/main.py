@@ -25,6 +25,8 @@ from app.db.models import (
     Project,
     ProjectDocument,
     ProjectInitializationRecord,
+    ProjectRegionRule,
+    ProjectWizardDraft,
     ProjectMaterialRequirement,
     ProjectMilestone,
     QualityCheckJob,
@@ -45,7 +47,7 @@ from app.services.artifacts import generate_artifact
 from app.services.auth import authenticate_user, get_session_user, logout_session
 from app.services.capabilities import platform_status
 from app.services.dashboard import build_dashboard
-from app.services.project_center import add_default_milestones, apply_project_defaults, build_project_center, can_change_status, ensure_project_initialization_package, ensure_project_member, evaluate_project_status_gate, generate_project_code, map_milestone, map_material_requirement, map_project_profile, map_project_summary
+from app.services.project_center import add_default_milestones, apply_project_defaults, build_project_center, can_change_status, ensure_project_initialization_package, ensure_project_member, evaluate_project_status_gate, generate_project_code, list_project_drafts, list_region_rules, map_milestone, map_material_requirement, map_project_draft, map_project_profile, map_project_summary, map_region_rule, upsert_project_draft
 from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, assert_review_approval_gate, is_management_role, map_task_event, map_workbench_event
 from app.services.documents import parse_document
 from app.services.estimates import calculate_estimate, confirm_estimate, get_estimate, map_estimate
@@ -56,7 +58,7 @@ from app.services.rag import generate_chapter_with_rag
 from app.services.storage import persist_upload, storage
 from app.worker.tasks import export_artifact_task, parse_document_task, quality_check_task
 
-app = FastAPI(title="住建项目策划平台 API", version="2.1.0")
+app = FastAPI(title="住建项目策划平台 API", version="2.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -79,6 +81,9 @@ class ProjectCreate(BaseModel):
     code: str | None = None
     templateId: str | None = None
     templateVersion: str | None = None
+    region: str | None = None
+    regionRuleId: str | None = None
+    draftId: str | None = None
     confidentiality: str | None = None
     plannedStart: str | None = None
     plannedEnd: str | None = None
@@ -97,6 +102,9 @@ class ProjectUpdate(BaseModel):
     risk: str | None = None
     templateId: str | None = None
     templateVersion: str | None = None
+    region: str | None = None
+    regionRuleId: str | None = None
+    draftId: str | None = None
     confidentiality: str | None = None
     plannedStart: str | None = None
     plannedEnd: str | None = None
@@ -132,6 +140,30 @@ class ProjectCopyAction(BaseModel):
     copyMembers: bool = True
     copyMilestones: bool = True
     copySettings: bool = True
+
+
+
+
+class ProjectDraftInput(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    step: int = 0
+    payload: dict = {}
+
+
+class ProjectRegionRuleInput(BaseModel):
+    id: str | None = None
+    name: str
+    region: str = "全国"
+    projectType: str | None = None
+    version: str = "v1.0"
+    status: str = "已发布"
+    description: str | None = None
+    materials: list[dict] = []
+    facts: list[dict] = []
+    chapters: list[dict] = []
+    artifacts: list[dict] = []
+    settings: dict = {}
 
 
 class DocumentCreate(BaseModel):
@@ -879,6 +911,76 @@ def project_center(db: Session = Depends(get_db), user: dict = Depends(current_u
     return build_project_center(db, user)
 
 
+@app.get("/api/project-drafts")
+def get_project_drafts(db: Session = Depends(get_db), user: dict = Depends(current_user)) -> list[dict]:
+    return list_project_drafts(db, user)
+
+
+@app.post("/api/project-drafts", status_code=201)
+def save_project_draft(payload: ProjectDraftInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    row = upsert_project_draft(db, user, payload.payload, payload.id, payload.step, payload.name)
+    write_audit(db, user["name"], "save_project_draft", "project_wizard_draft", row.id, {"step": payload.step, "name": payload.name})
+    db.commit()
+    return map_project_draft(row)
+
+
+@app.delete("/api/project-drafts/{draft_id}")
+def delete_project_draft(draft_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    row = db.get(ProjectWizardDraft, draft_id)
+    if not row or row.user_id != user.get("id"):
+        raise HTTPException(status_code=404, detail="Project draft not found")
+    row.status = "已删除"
+    row.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "delete_project_draft", "project_wizard_draft", draft_id, {})
+    db.commit()
+    return {"id": draft_id, "status": row.status}
+
+
+@app.get("/api/project-region-rules")
+def get_project_region_rules(db: Session = Depends(get_db), _: dict = Depends(current_user)) -> list[dict]:
+    return list_region_rules(db)
+
+
+@app.post("/api/project-region-rules", status_code=201)
+def upsert_project_region_rule(payload: ProjectRegionRuleInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    if not is_management_role(user.get("role")):
+        raise HTTPException(status_code=403, detail="仅管理角色可维护地区规则")
+    rule_id = payload.id or f"PRR-{int(time.time() * 1000)}"
+    row = db.get(ProjectRegionRule, rule_id)
+    if not row:
+        row = ProjectRegionRule(
+            id=rule_id,
+            name=payload.name,
+            region=payload.region,
+            project_type=payload.projectType,
+            version=payload.version,
+            status=payload.status,
+            description=payload.description,
+            materials=payload.materials,
+            facts=payload.facts,
+            chapters=payload.chapters,
+            artifacts=payload.artifacts,
+            settings=payload.settings,
+        )
+        db.add(row)
+    else:
+        row.name = payload.name
+        row.region = payload.region
+        row.project_type = payload.projectType
+        row.version = payload.version
+        row.status = payload.status
+        row.description = payload.description
+        row.materials = payload.materials
+        row.facts = payload.facts
+        row.chapters = payload.chapters
+        row.artifacts = payload.artifacts
+        row.settings = payload.settings
+        row.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "upsert_project_region_rule", "project_region_rule", row.id, payload.model_dump())
+    db.commit()
+    return map_region_rule(row)
+
+
 @app.get("/api/projects")
 def list_projects(db: Session = Depends(get_db), user: dict = Depends(current_user)) -> list[dict]:
     return build_project_center(db, user)["projects"]
@@ -899,6 +1001,10 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db), user: 
         confidentiality=payload.confidentiality or "内部",
         template_id=payload.templateId or (template.id if template else None),
         template_version=payload.templateVersion or (template.version if template else None),
+        region=payload.region or payload.location or "待补充",
+        region_rule_id=payload.regionRuleId or "BUILTIN-COMMON",
+        initialization_rule_version=None,
+        draft_source_id=payload.draftId,
         planned_start=payload.plannedStart,
         planned_end=payload.plannedEnd,
         description=payload.description,
@@ -931,6 +1037,11 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db), user: 
     else:
         add_default_milestones(db, project)
     ensure_project_initialization_package(db, project, user)
+    if payload.draftId:
+        draft = db.get(ProjectWizardDraft, payload.draftId)
+        if draft and draft.user_id == user.get("id"):
+            draft.status = "已使用"
+            draft.updated_at = datetime.now(timezone.utc)
     write_audit(db, user["name"], "create_project", "project", project.id, payload.model_dump())
     db.commit()
     return map_project_profile(db, project, user)
@@ -960,7 +1071,7 @@ def update_project(project_id: str, payload: ProjectUpdate, db: Session = Depend
     if not is_management_role(user.get("role")) and project.owner != user.get("name"):
         raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可修改项目基本信息")
     fields = payload.model_dump(exclude_none=True)
-    mapping = {"templateId": "template_id", "templateVersion": "template_version", "plannedStart": "planned_start", "plannedEnd": "planned_end"}
+    mapping = {"templateId": "template_id", "templateVersion": "template_version", "regionRuleId": "region_rule_id", "draftId": "draft_source_id", "plannedStart": "planned_start", "plannedEnd": "planned_end"}
     for key, value in fields.items():
         attr = mapping.get(key, key)
         setattr(project, attr, value)
@@ -1167,6 +1278,10 @@ def copy_project(project_id: str, payload: ProjectCopyAction, db: Session = Depe
         confidentiality=source.confidentiality if payload.copySettings else "内部",
         template_id=source.template_id if payload.copySettings else None,
         template_version=source.template_version if payload.copySettings else None,
+        region=source.region if payload.copySettings else source.location,
+        region_rule_id=source.region_rule_id if payload.copySettings else "BUILTIN-COMMON",
+        initialization_rule_version=None,
+        draft_source_id=None,
         planned_start=None,
         planned_end=None,
         description=f"由 {source.name} 复制创建。",

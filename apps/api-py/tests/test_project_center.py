@@ -13,6 +13,8 @@ from app.db.models import (
     ProjectMaterialRequirement,
     ProjectMember,
     ProjectMilestone,
+    ProjectRegionRule,
+    ProjectWizardDraft,
     QualityCheckJob,
     QualityIssue,
     ReportChapter,
@@ -139,7 +141,7 @@ class ProjectCenterTest(unittest.TestCase):
         project.archived_at = None
         db = FakeSession({Project: [project], ProjectMember: [], ProjectMilestone: [], ProjectMaterialRequirement: [], ProjectInitializationRecord: [], FactItem: [], ReportChapter: [], Artifact: []})
         summary = ensure_project_initialization_package(db, project, {"id": "U1", "name": "张工", "role": "项目负责人"})
-        self.assertEqual(summary["packageVersion"], "v2.1")
+        self.assertEqual(summary["packageVersion"], "v2.2")
         self.assertGreaterEqual(len(db.rows_by_model[ProjectMaterialRequirement]), 5)
         self.assertGreaterEqual(len(db.rows_by_model[FactItem]), 5)
         self.assertGreaterEqual(len(db.rows_by_model[ReportChapter]), 6)
@@ -170,6 +172,37 @@ class ProjectCenterTest(unittest.TestCase):
         self.assertFalse(gate["allowed"])
         self.assertTrue(any(item["code"] == "unapproved_chapters" for item in gate["blockers"]))
         self.assertTrue(any(item["code"] == "ungenerated_artifacts" for item in gate["blockers"]))
+
+    def test_region_rule_drives_initialization_package(self):
+        project = Project(id="P005", name="规则项目", type="政府投资", location="南京", phase="项目建档", owner="张工", progress=8, risk="一般")
+        project.code = "ZJ-2026-0005"
+        project.status = "建档中"
+        project.confidentiality = "内部"
+        project.template_id = "TPL-001"
+        project.template_version = "v1.0"
+        project.region = "江苏"
+        project.region_rule_id = "BUILTIN-GOV-INVESTMENT"
+        project.initialization_rule_version = None
+        project.draft_source_id = None
+        project.planned_start = None
+        project.planned_end = None
+        project.description = None
+        project.archived_at = None
+        db = FakeSession({Project: [project], ProjectRegionRule: [], ProjectMember: [], ProjectMilestone: [], ProjectMaterialRequirement: [], ProjectInitializationRecord: [], FactItem: [], ReportChapter: [], Artifact: []})
+        summary = ensure_project_initialization_package(db, project, {"id": "U1", "name": "张工", "role": "项目负责人"})
+        self.assertEqual(summary["ruleId"], "BUILTIN-GOV-INVESTMENT")
+        self.assertTrue(any(row.name == "政府投资合规清单.xlsx" for row in db.rows_by_model[Artifact]))
+        self.assertTrue(any(row.name == "财政资金比例" for row in db.rows_by_model[FactItem]))
+
+    def test_project_center_lists_region_rules_and_drafts(self):
+        now = datetime.now(timezone.utc)
+        user = AppUser(id="U1", name="张工", role="项目负责人", department="咨询部", status="启用", email="pm@example.com", password_hash=None, password_salt=None)
+        draft = ProjectWizardDraft(id="PWD-1", user_id="U1", name="草稿项目", step=1, status="草稿", payload={"name": "草稿项目", "regionRuleId": "BUILTIN-COMMON"}, created_at=now, updated_at=now)
+        db = FakeSession({Project: [], AppUser: [user], ProjectWizardDraft: [draft], ProjectRegionRule: [], ReportTemplate: []})
+        result = build_project_center(db, {"id": "U1", "name": "张工", "role": "项目负责人", "department": "咨询部", "status": "启用"})
+        self.assertGreaterEqual(len(result["regionRules"]), 1)
+        self.assertEqual(result["wizardDrafts"][0]["id"], "PWD-1")
+        self.assertTrue(result["capabilities"]["wizardDraft"])
 
 
 if __name__ == "__main__":

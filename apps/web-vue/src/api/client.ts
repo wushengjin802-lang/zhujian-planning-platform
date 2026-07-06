@@ -1,4 +1,4 @@
-import type { AppUser, Artifact, BootstrapPayload, DashboardNotification, DashboardPayload, FactItem, InvestmentEstimate, NotificationSubscription, PlatformStatus, Project, ProjectCenterPayload, ProjectCreateInput, ProjectDocument, ProjectProfile, ProjectStatusGate, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
+import type { AppUser, Artifact, BootstrapPayload, DashboardNotification, DashboardPayload, FactItem, InvestmentEstimate, NotificationSubscription, PlatformStatus, Project, ProjectCenterPayload, ProjectCreateInput, ProjectDocument, ProjectRegionRule, ProjectWizardDraft, ProjectProfile, ProjectStatusGate, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
 
 const tokenKey = "zhujian.sessionToken";
 
@@ -64,6 +64,18 @@ export function loadProjectCenter() {
 
 export function loadProjectProfile(projectId: string) {
   return request<ProjectProfile>(`/api/projects/${projectId}`);
+}
+
+export function saveProjectDraft(input: { id?: string; name?: string; step?: number; payload: ProjectCreateInput }) {
+  return request<ProjectWizardDraft>("/api/project-drafts", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function deleteProjectDraft(id: string) {
+  return request<{ id: string; status: string }>(`/api/project-drafts/${id}`, { method: "DELETE" });
+}
+
+export function loadProjectRegionRules() {
+  return request<ProjectRegionRule[]>("/api/project-region-rules");
 }
 
 export function createProject(input: ProjectCreateInput) {
