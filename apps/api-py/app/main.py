@@ -41,7 +41,7 @@ from app.services.artifacts import generate_artifact
 from app.services.auth import authenticate_user, get_session_user, logout_session
 from app.services.capabilities import platform_status
 from app.services.dashboard import build_dashboard
-from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, map_task_event, map_workbench_event
+from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, is_management_role, map_task_event, map_workbench_event
 from app.services.documents import parse_document
 from app.services.estimates import calculate_estimate, confirm_estimate, get_estimate, map_estimate
 from app.services.jobs import enqueue_or_run, revoke_task
@@ -146,6 +146,45 @@ def current_user(db: Session = Depends(get_db), token: str | None = Depends(bear
     return user
 
 
+def _is_same_user(value: str | None, user: dict) -> bool:
+    return bool(value and value == user.get("id"))
+
+
+def _can_manage_workbench(user: dict) -> bool:
+    return is_management_role(user.get("role"))
+
+
+def assert_work_item_actor(item: WorkItem, user: dict, action: str) -> None:
+    """Limit state-changing work-item actions to the assignee or management roles.
+
+    Claiming an unassigned item remains open to visible project members, but completing,
+    cancelling or transferring another person's item is blocked. This keeps the
+    workbench inside its intended coordination boundary without introducing a full RBAC layer.
+    """
+    if _can_manage_workbench(user):
+        return
+    if action == "claim" and not item.assignee_id:
+        return
+    if _is_same_user(item.assignee_id, user):
+        return
+    raise HTTPException(status_code=403, detail="仅工作项负责人或管理角色可执行该操作")
+
+
+def assert_review_task_actor(task: ReviewTask, user: dict, action: str) -> None:
+    """Limit review decisions to assigned reviewers or management roles.
+
+    Comments and countersign are still allowed for visible project members, because they
+    are collaboration records rather than final review decisions.
+    """
+    if action in {"comment", "countersign"}:
+        return
+    if _can_manage_workbench(user) or _is_same_user(task.reviewer_id, user):
+        return
+    if action == "assign" and not task.reviewer_id:
+        return
+    raise HTTPException(status_code=403, detail="仅指定审核人或管理角色可执行该审核操作")
+
+
 @app.get("/health")
 def health(db: Session = Depends(get_db)) -> dict:
     ok = db.scalar(select(text("1")))
@@ -224,6 +263,7 @@ def cancel_work_item(item_id: str, payload: WorkItemAction | None = None, db: Se
         raise HTTPException(status_code=403, detail=str(exc))
     if item.status == "已完成":
         raise HTTPException(status_code=409, detail="Completed work item cannot be cancelled")
+    assert_work_item_actor(item, user, "cancel")
     item.status = "已取消"
     item.updated_at = datetime.now(timezone.utc)
     comment = payload.comment if payload else None
@@ -257,6 +297,7 @@ def comment_review_task(task_id: str, payload: CommentAction, db: Session = Depe
         raise HTTPException(status_code=403, detail=str(exc))
     if not payload.comment.strip():
         raise HTTPException(status_code=400, detail="comment is required")
+    assert_review_task_actor(task, user, "comment")
     event = add_workbench_event(db, project_id=task.project_id, target_type="review_task", target_id=task.id, action="comment", actor=user, comment=payload.comment.strip())
     task.updated_at = datetime.now(timezone.utc)
     write_audit(db, user["name"], "comment_review_task", "review_task", task_id, {"comment": payload.comment.strip()})
@@ -275,6 +316,7 @@ def assign_review_task(task_id: str, payload: ReviewAction, db: Session = Depend
         assert_project_visible(db, user, task.project_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    assert_review_task_actor(task, user, "assign")
     reviewer = db.get(AppUser, payload.reviewerId)
     if not reviewer or reviewer.status != "启用":
         raise HTTPException(status_code=404, detail="Reviewer not found or disabled")
@@ -297,6 +339,7 @@ def countersign_review_task(task_id: str, payload: ReviewAction, db: Session = D
         assert_project_visible(db, user, task.project_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    assert_review_task_actor(task, user, "countersign")
     comment = payload.comment or "同意当前审核意见。"
     event = add_workbench_event(db, project_id=task.project_id, target_type="review_task", target_id=task.id, action="countersign", actor=user, comment=comment)
     task.status = "审核中"
@@ -368,6 +411,7 @@ def claim_work_item(item_id: str, payload: WorkItemAction | None = None, db: Ses
         raise HTTPException(status_code=403, detail=str(exc))
     if item.status in {"已完成", "已取消"}:
         raise HTTPException(status_code=409, detail="Work item is already closed")
+    assert_work_item_actor(item, user, "claim")
     assignee_id = (payload.assigneeId if payload else None) or user["id"]
     item.assignee_id = assignee_id
     item.status = "处理中"
@@ -389,6 +433,7 @@ def complete_work_item(item_id: str, payload: WorkItemAction | None = None, db: 
         raise HTTPException(status_code=403, detail=str(exc))
     if item.status in {"已完成", "已取消"}:
         return {"id": item.id, "status": item.status}
+    assert_work_item_actor(item, user, "complete")
     item.status = "已完成"
     item.assignee_id = item.assignee_id or user["id"]
     item.completed_at = datetime.now(timezone.utc)
@@ -410,6 +455,7 @@ def transfer_work_item(item_id: str, payload: WorkItemAction, db: Session = Depe
         assert_project_visible(db, user, item.project_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    assert_work_item_actor(item, user, "transfer")
     target = db.get(AppUser, payload.assigneeId)
     if not target or target.status != "启用":
         raise HTTPException(status_code=404, detail="Target user not found or disabled")
@@ -432,6 +478,7 @@ def approve_review_task(task_id: str, payload: ReviewAction | None = None, db: S
         assert_project_visible(db, user, task.project_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    assert_review_task_actor(task, user, "approve")
     task.status = "已通过"
     task.reviewer_id = task.reviewer_id or user["id"]
     task.decision = "approved"
@@ -439,7 +486,6 @@ def approve_review_task(task_id: str, payload: ReviewAction | None = None, db: S
     task.decided_at = datetime.now(timezone.utc)
     task.updated_at = task.decided_at
     add_workbench_event(db, project_id=task.project_id, target_type="review_task", target_id=task.id, action="approve", actor=user, comment=task.comment, payload={"targetType": task.target_type, "targetId": task.target_id})
-    add_workbench_event(db, project_id=task.project_id, target_type="review_task", target_id=task.id, action="reject", actor=user, comment=task.comment, payload={"targetType": task.target_type, "targetId": task.target_id})
     if task.target_type == "report_chapter":
         chapter = db.get(ReportChapter, task.target_id)
         if chapter:
@@ -465,6 +511,7 @@ def reject_review_task(task_id: str, payload: ReviewAction | None = None, db: Se
         assert_project_visible(db, user, task.project_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    assert_review_task_actor(task, user, "reject")
     task.status = "已退回"
     task.reviewer_id = task.reviewer_id or user["id"]
     task.decision = "rejected"

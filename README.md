@@ -137,3 +137,14 @@ apps/api-py/alembic/versions/20260706_0004_workbench_boundary_models.py
 ```
 
 详见：`docs/00_project/工作台边界能力完善说明_20260706.md`。
+
+
+## v1.2 工作台边界内继续完善（2026-07-06）
+
+本次继续限定在工作台功能边界内，补齐前端转交入口、工作项/审核记录查看、动作级权限校验和审核事件留痕修正，不扩展到报告、GIS、投资测算或方案比选等其他业务模块。
+
+更新后的功能完成度 Checklist 已放入：
+
+```text
+docs/00_project/住建平台功能完成度Checklist_v1.2_20260706.xlsx
+```

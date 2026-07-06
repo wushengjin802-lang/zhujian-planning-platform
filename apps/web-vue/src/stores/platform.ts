@@ -34,6 +34,7 @@ import {
   rejectReviewTask,
   requestArtifactExport,
   retryBackgroundTask,
+  transferWorkItem,
   runDocumentParse,
   updateChapter,
   updateFact,
@@ -247,6 +248,10 @@ export const usePlatformStore = defineStore("platform", () => {
     return runAction("完成工作项", () => completeWorkItem(id));
   }
 
+  function transferDashboardWorkItem(id: string, assigneeId: string, comment?: string) {
+    return runAction("转交工作项", () => transferWorkItem(id, assigneeId, comment));
+  }
+
   function approveDashboardReviewTask(id: string) {
     return runAction("审核通过", () => approveReviewTask(id));
   }
@@ -336,6 +341,7 @@ export const usePlatformStore = defineStore("platform", () => {
     confirmInvestment,
     claimDashboardWorkItem,
     completeDashboardWorkItem,
+    transferDashboardWorkItem,
     approveDashboardReviewTask,
     rejectDashboardReviewTask,
     readDashboardNotification,

@@ -19,7 +19,7 @@ import {
   TrendCharts,
   Warning
 } from "@element-plus/icons-vue";
-import type { DashboardMetric, DashboardTone } from "../types";
+import type { DashboardMetric, DashboardTone, WorkbenchEvent } from "../types";
 import { usePlatformStore } from "../stores/platform";
 
 const store = usePlatformStore();
@@ -27,6 +27,10 @@ const router = useRouter();
 const activeWorkTab = ref<"todo" | "review">("todo");
 const taskFilter = ref("全部");
 const activeActivityTab = ref<"audit" | "event">("audit");
+const eventDialogVisible = ref(false);
+const eventDialogTitle = ref("处理记录");
+const eventRows = ref<WorkbenchEvent[]>([]);
+const eventLoading = ref(false);
 
 const dashboard = computed(() => store.dashboard);
 const visibleTasks = computed(() => {
@@ -136,6 +140,52 @@ async function assignReviewTask(id: string) {
     inputPlaceholder: "审核人用户ID"
   });
   await store.assignDashboardReviewTask(id, result.value, "工作台分配审核人");
+}
+
+async function transferWorkItemAction(id: string) {
+  const result = await ElMessageBox.prompt("请输入接收人用户ID，例如 U001", "转交工作项", {
+    confirmButtonText: "转交",
+    cancelButtonText: "取消",
+    inputPlaceholder: "接收人用户ID"
+  });
+  await store.transferDashboardWorkItem(id, result.value, "工作台转交");
+}
+
+function eventActionLabel(action: string) {
+  const labels: Record<string, string> = {
+    claim: "领取",
+    complete: "完成",
+    transfer: "转交",
+    cancel: "取消",
+    comment: "意见",
+    assign: "分配",
+    countersign: "会签",
+    approve: "通过",
+    reject: "退回"
+  };
+  return labels[action] ?? action;
+}
+
+async function showWorkItemEvents(id: string, title: string) {
+  eventDialogTitle.value = `工作项记录：${title}`;
+  eventDialogVisible.value = true;
+  eventLoading.value = true;
+  try {
+    eventRows.value = await store.loadWorkItemEvents(id);
+  } finally {
+    eventLoading.value = false;
+  }
+}
+
+async function showReviewTaskEvents(id: string, title: string) {
+  eventDialogTitle.value = `审核记录：${title}`;
+  eventDialogVisible.value = true;
+  eventLoading.value = true;
+  try {
+    eventRows.value = await store.loadReviewTaskEvents(id);
+  } finally {
+    eventLoading.value = false;
+  }
 }
 
 function taskEventsFor(row: { id: string; taskKind: string }) {
@@ -311,8 +361,10 @@ watch(
               <span class="work-actions">
                 <el-button v-if="item.status !== '处理中'" link type="primary" @click.stop="store.claimDashboardWorkItem(item.id)">领取</el-button>
                 <el-button link type="info" @click.stop="commentWorkItem(item.id)">意见</el-button>
+                <el-button link type="primary" @click.stop="transferWorkItemAction(item.id)">转交</el-button>
                 <el-button link type="success" @click.stop="store.completeDashboardWorkItem(item.id)">完成</el-button>
                 <el-button link type="warning" @click.stop="cancelWorkItem(item.id)">取消</el-button>
+                <el-button link type="info" @click.stop="showWorkItemEvents(item.id, item.title)">记录</el-button>
               </span>
               <el-icon><Right /></el-icon>
             </button>
@@ -340,6 +392,7 @@ watch(
                 <el-button link type="success" @click.stop="store.approveDashboardReviewTask(item.id)">通过</el-button>
                 <el-button link type="warning" @click.stop="store.rejectDashboardReviewTask(item.id)">退回</el-button>
                 <el-button link type="primary" @click.stop="countersignReviewTask(item.id)">会签</el-button>
+                <el-button link type="info" @click.stop="showReviewTaskEvents(item.id, item.title)">记录</el-button>
               </span>
               <el-icon><Right /></el-icon>
             </button>
@@ -502,6 +555,21 @@ watch(
           </el-table-column>
         </el-table>
       </el-card>
+
+      <el-dialog v-model="eventDialogVisible" :title="eventDialogTitle" width="560px">
+        <el-timeline v-loading="eventLoading" class="event-dialog-timeline">
+          <el-timeline-item
+            v-for="event in eventRows"
+            :key="event.id"
+            :timestamp="formatTime(event.createdAt)"
+            placement="top"
+          >
+            <strong>{{ eventActionLabel(event.action) }}</strong>
+            <p>{{ event.actorName }} · {{ event.comment || '无补充意见' }}</p>
+          </el-timeline-item>
+        </el-timeline>
+        <el-empty v-if="!eventLoading && !eventRows.length" description="暂无处理记录" :image-size="70" />
+      </el-dialog>
     </section>
 
     <el-skeleton v-else :rows="10" animated />
@@ -988,5 +1056,16 @@ watch(
   .work-row > .el-tag:nth-of-type(2) {
     display: none;
   }
+}
+.event-dialog-timeline {
+  min-height: 80px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 8px;
+}
+
+.event-dialog-timeline p {
+  margin: 4px 0 0;
+  color: #64748b;
 }
 </style>

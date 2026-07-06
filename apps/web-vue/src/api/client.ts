@@ -134,6 +134,13 @@ export function completeWorkItem(id: string, comment?: string) {
   });
 }
 
+export function transferWorkItem(id: string, assigneeId: string, comment?: string) {
+  return request<{ id: string; status: string; assigneeId?: string }>(`/api/work-items/${id}/transfer`, {
+    method: "POST",
+    body: JSON.stringify({ assigneeId, comment })
+  });
+}
+
 export function approveReviewTask(id: string, comment?: string) {
   return request<{ id: string; status: string; decision: string }>(`/api/review-tasks/${id}/approve`, {
     method: "POST",

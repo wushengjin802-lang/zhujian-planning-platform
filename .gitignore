@@ -1,9 +1,5 @@
 .env
 *.log
-*.err
-*.zip
-~$*.xlsx
-login-page-preview*.png
 __pycache__/
 *.py[cod]
 node_modules/
