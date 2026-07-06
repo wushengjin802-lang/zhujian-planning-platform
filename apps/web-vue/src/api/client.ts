@@ -1,4 +1,4 @@
-import type { AppUser, Artifact, BootstrapPayload, DashboardNotification, DashboardPayload, FactItem, InvestmentEstimate, NotificationSubscription, PlatformStatus, Project, ProjectCenterPayload, ProjectCreateInput, ProjectDocument, ProjectProfile, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
+import type { AppUser, Artifact, BootstrapPayload, DashboardNotification, DashboardPayload, FactItem, InvestmentEstimate, NotificationSubscription, PlatformStatus, Project, ProjectCenterPayload, ProjectCreateInput, ProjectDocument, ProjectProfile, ProjectStatusGate, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
 
 const tokenKey = "zhujian.sessionToken";
 
@@ -92,6 +92,18 @@ export function updateProjectMilestone(projectId: string, milestoneId: string, i
 
 export function changeProjectStatus(projectId: string, status: string, reason?: string) {
   return request<ProjectProfile>(`/api/projects/${projectId}/status`, { method: "POST", body: JSON.stringify({ status, reason }) });
+}
+
+export function initializeProjectPackage(projectId: string) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/initialize`, { method: "POST" });
+}
+
+export function updateProjectMaterial(projectId: string, materialId: string, input: { status: string; sourceType?: string; sourceId?: string }) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/materials/${materialId}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export function loadProjectStatusGate(projectId: string, targetStatus: string) {
+  return request<ProjectStatusGate>(`/api/projects/${projectId}/status-gate?targetStatus=${encodeURIComponent(targetStatus)}`);
 }
 
 export function copyProject(projectId: string, input: { name?: string; copyMembers?: boolean; copyMilestones?: boolean; copySettings?: boolean }) {

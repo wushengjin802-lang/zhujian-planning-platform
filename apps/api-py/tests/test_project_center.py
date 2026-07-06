@@ -9,13 +9,16 @@ from app.db.models import (
     FactItem,
     Project,
     ProjectDocument,
+    ProjectInitializationRecord,
+    ProjectMaterialRequirement,
     ProjectMember,
     ProjectMilestone,
+    QualityCheckJob,
     QualityIssue,
     ReportChapter,
     ReportTemplate,
 )
-from app.services.project_center import add_default_milestones, build_project_center, map_project_profile
+from app.services.project_center import add_default_milestones, build_project_center, evaluate_project_status_gate, ensure_project_initialization_package, map_project_profile
 
 
 class ScalarRows:
@@ -70,7 +73,9 @@ class ProjectCenterTest(unittest.TestCase):
 
         user = AppUser(id="U1", name="张工", role="项目负责人", department="咨询部", status="启用", email="pm@example.com", password_hash=None, password_salt=None)
         member = ProjectMember(project_id="P001", user_id="U1", role="项目负责人")
-        milestone = ProjectMilestone(id="PM-1", project_id="P001", name="资料清点", owner="张工", status="进行中", due_at="2026-07-10", completed_at=None, sort_order=1)
+        milestone = ProjectMilestone(id="PM-1", project_id="P001", name="资料清点", owner="张工", status="已完成", due_at="2026-07-10", completed_at=now, sort_order=1)
+        material = ProjectMaterialRequirement(id="PMR-1", project_id="P001", category="立项资料", name="项目立项批复或任务来源说明", required=True, status="已确认", source_type="document", source_id="D1", sort_order=1)
+        record = ProjectInitializationRecord(id="PIR-1", project_id="P001", package_version="v2.1", status="已初始化", summary={"created": {}}, created_by="张工", created_at=now, updated_at=now)
         document = ProjectDocument(id="D1", project_id="P001", name="批复.pdf", category="立项资料", version="v1", parse_status="已解析", source="上传", updated_at="2026-07-06", storage_path=None, file_size=1, mime_type="application/pdf", checksum="x")
         fact = FactItem(id="F1", project_id="P001", fact_group="基本", name="面积", value="1000", unit="㎡", source="批复", owner="张工", status="已确认")
         chapter = ReportChapter(id="C1", project_id="P001", chapter_no="1", title="总论", owner="张工", status="已审核", citation_count=3, quality="一般", content="正文")
@@ -83,6 +88,8 @@ class ProjectCenterTest(unittest.TestCase):
             AppUser: [user],
             ProjectMember: [member],
             ProjectMilestone: [milestone],
+            ProjectMaterialRequirement: [material],
+            ProjectInitializationRecord: [record],
             ProjectDocument: [document],
             FactItem: [fact],
             ReportChapter: [chapter],
@@ -118,6 +125,51 @@ class ProjectCenterTest(unittest.TestCase):
         self.assertEqual(len(first), 5)
         self.assertEqual(len(second), 5)
         self.assertEqual(len(db.rows_by_model[ProjectMilestone]), 5)
+
+    def test_initialization_package_creates_material_fact_chapter_and_artifact_plan(self):
+        project = Project(id="P003", name="初始化项目", type="可研", location="南京", phase="项目建档", owner="张工", progress=8, risk="一般")
+        project.code = "ZJ-2026-0003"
+        project.status = "建档中"
+        project.confidentiality = "内部"
+        project.template_id = "TPL-001"
+        project.template_version = "v1.0"
+        project.planned_start = None
+        project.planned_end = None
+        project.description = None
+        project.archived_at = None
+        db = FakeSession({Project: [project], ProjectMember: [], ProjectMilestone: [], ProjectMaterialRequirement: [], ProjectInitializationRecord: [], FactItem: [], ReportChapter: [], Artifact: []})
+        summary = ensure_project_initialization_package(db, project, {"id": "U1", "name": "张工", "role": "项目负责人"})
+        self.assertEqual(summary["packageVersion"], "v2.1")
+        self.assertGreaterEqual(len(db.rows_by_model[ProjectMaterialRequirement]), 5)
+        self.assertGreaterEqual(len(db.rows_by_model[FactItem]), 5)
+        self.assertGreaterEqual(len(db.rows_by_model[ReportChapter]), 6)
+        self.assertGreaterEqual(len(db.rows_by_model[Artifact]), 4)
+        profile = map_project_profile(db, project, {"id": "U1", "name": "张工", "role": "项目负责人"})
+        self.assertTrue(profile["initialization"]["packageReady"])
+
+    def test_archive_gate_blocks_until_chapters_and_artifacts_are_ready(self):
+        now = datetime.now(timezone.utc)
+        project = Project(id="P004", name="待归档项目", type="可研", location="南京", phase="项目关闭", owner="张工", progress=90, risk="一般")
+        project.code = "ZJ-2026-0004"
+        project.status = "已关闭"
+        project.confidentiality = "内部"
+        project.template_id = "TPL-001"
+        project.template_version = "v1.0"
+        project.planned_start = None
+        project.planned_end = None
+        project.description = None
+        project.archived_at = None
+        member = ProjectMember(project_id="P004", user_id="U1", role="项目负责人")
+        milestone = ProjectMilestone(id="PM-4", project_id="P004", name="成果归档", owner="张工", status="已完成", due_at=None, completed_at=now, sort_order=1)
+        material = ProjectMaterialRequirement(id="PMR-4", project_id="P004", category="立项资料", name="项目立项批复或任务来源说明", required=True, status="已确认", source_type=None, source_id=None, sort_order=1)
+        fact = FactItem(id="F4", project_id="P004", fact_group="基本", name="建设地点", value="南京", unit=None, source="人工", owner="张工", status="已确认")
+        chapter = ReportChapter(id="C4", project_id="P004", chapter_no="1", title="项目概况", owner="张工", status="待审核", citation_count=1, quality="提示", content="草稿")
+        artifact = Artifact(id="A4", project_id="P004", name="成果报告.docx", format="Word", status="可生成", updated_at="2026-07-06", storage_path=None, file_size=None, generated_at=None)
+        db = FakeSession({Project: [project], ProjectMember: [member], ProjectMilestone: [milestone], ProjectMaterialRequirement: [material], ProjectInitializationRecord: [], FactItem: [fact], ReportChapter: [chapter], Artifact: [artifact], QualityIssue: [], ProjectDocument: [], QualityCheckJob: []})
+        gate = evaluate_project_status_gate(db, project, "已归档")
+        self.assertFalse(gate["allowed"])
+        self.assertTrue(any(item["code"] == "unapproved_chapters" for item in gate["blockers"]))
+        self.assertTrue(any(item["code"] == "ungenerated_artifacts" for item in gate["blockers"]))
 
 
 if __name__ == "__main__":

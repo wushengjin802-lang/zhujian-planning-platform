@@ -24,6 +24,8 @@ from app.db.models import (
     ParseJob,
     Project,
     ProjectDocument,
+    ProjectInitializationRecord,
+    ProjectMaterialRequirement,
     ProjectMilestone,
     QualityCheckJob,
     QualityIssue,
@@ -43,7 +45,7 @@ from app.services.artifacts import generate_artifact
 from app.services.auth import authenticate_user, get_session_user, logout_session
 from app.services.capabilities import platform_status
 from app.services.dashboard import build_dashboard
-from app.services.project_center import add_default_milestones, apply_project_defaults, build_project_center, can_change_status, ensure_project_member, generate_project_code, map_milestone, map_project_profile, map_project_summary
+from app.services.project_center import add_default_milestones, apply_project_defaults, build_project_center, can_change_status, ensure_project_initialization_package, ensure_project_member, evaluate_project_status_gate, generate_project_code, map_milestone, map_material_requirement, map_project_profile, map_project_summary
 from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, assert_review_approval_gate, is_management_role, map_task_event, map_workbench_event
 from app.services.documents import parse_document
 from app.services.estimates import calculate_estimate, confirm_estimate, get_estimate, map_estimate
@@ -54,7 +56,7 @@ from app.services.rag import generate_chapter_with_rag
 from app.services.storage import persist_upload, storage
 from app.worker.tasks import export_artifact_task, parse_document_task, quality_check_task
 
-app = FastAPI(title="住建项目策划平台 API", version="2.0.0")
+app = FastAPI(title="住建项目策划平台 API", version="2.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -112,6 +114,12 @@ class ProjectMilestoneInput(BaseModel):
     status: str = "未开始"
     dueAt: str | None = None
     sortOrder: int | None = None
+
+
+class ProjectMaterialInput(BaseModel):
+    status: str
+    sourceType: str | None = None
+    sourceId: str | None = None
 
 
 class ProjectStatusAction(BaseModel):
@@ -922,6 +930,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db), user: 
             ))
     else:
         add_default_milestones(db, project)
+    ensure_project_initialization_package(db, project, user)
     write_audit(db, user["name"], "create_project", "project", project.id, payload.model_dump())
     db.commit()
     return map_project_profile(db, project, user)
@@ -1053,6 +1062,59 @@ def update_project_milestone(project_id: str, milestone_id: str, payload: Projec
     return map_project_profile(db, project, user)
 
 
+@app.post("/api/projects/{project_id}/initialize", status_code=201)
+def initialize_project_package(project_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可初始化项目包")
+    summary = ensure_project_initialization_package(db, project, user)
+    write_audit(db, user["name"], "initialize_project_package", "project", project_id, summary)
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
+@app.patch("/api/projects/{project_id}/materials/{material_id}")
+def update_project_material(project_id: str, material_id: str, payload: ProjectMaterialInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    row = db.get(ProjectMaterialRequirement, material_id)
+    if not project or not row or row.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Project material requirement not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可维护资料清单")
+    if payload.status not in {"待上传", "已上传", "已确认", "不适用"}:
+        raise HTTPException(status_code=400, detail="Unsupported material status")
+    row.status = payload.status
+    row.source_type = payload.sourceType
+    row.source_id = payload.sourceId
+    row.updated_at = datetime.now(timezone.utc)
+    project.updated_at = row.updated_at
+    write_audit(db, user["name"], "update_project_material", "project_material", material_id, payload.model_dump())
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
+@app.get("/api/projects/{project_id}/status-gate")
+def get_project_status_gate(project_id: str, targetStatus: str = "已关闭", db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return evaluate_project_status_gate(db, project, targetStatus)
+
+
 @app.post("/api/projects/{project_id}/status")
 def change_project_status(project_id: str, payload: ProjectStatusAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     project = db.get(Project, project_id)
@@ -1066,6 +1128,9 @@ def change_project_status(project_id: str, payload: ProjectStatusAction, db: Ses
         raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可变更项目状态")
     if not can_change_status(project, payload.status):
         raise HTTPException(status_code=409, detail=f"当前状态不允许变更为 {payload.status}")
+    gate = evaluate_project_status_gate(db, project, payload.status)
+    if payload.status in {"已关闭", "已归档"} and not gate["allowed"]:
+        raise HTTPException(status_code=409, detail={"message": "项目状态门禁未通过", "gate": gate})
     project.status = payload.status
     if payload.status == "已归档":
         project.archived_at = datetime.now(timezone.utc)
@@ -1119,6 +1184,7 @@ def copy_project(project_id: str, payload: ProjectCopyAction, db: Session = Depe
             db.add(ProjectMilestone(id=f"PM-{clone.id}-{index}", project_id=clone.id, name=milestone.name, owner=milestone.owner, status="未开始", due_at=None, completed_at=None, sort_order=index))
     else:
         add_default_milestones(db, clone)
+    ensure_project_initialization_package(db, clone, user)
     write_audit(db, user["name"], "copy_project", "project", clone.id, {"sourceProjectId": project_id, **payload.model_dump()})
     db.commit()
     return map_project_profile(db, clone, user)

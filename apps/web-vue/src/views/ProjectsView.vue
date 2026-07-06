@@ -6,12 +6,15 @@ import {
   addProjectMember,
   addProjectMilestone,
   changeProjectStatus,
+  initializeProjectPackage,
   copyProject,
   createProject,
   loadProjectCenter,
   loadProjectProfile,
+  loadProjectStatusGate,
   removeProjectMember,
   updateProject,
+  updateProjectMaterial,
   updateProjectMilestone
 } from "../api/client";
 import type { ProjectCenterPayload, ProjectCreateInput, ProjectMilestoneInfo, ProjectProfile, ProjectSummary } from "../types";
@@ -28,6 +31,7 @@ const filters = reactive({ keyword: "", status: "", risk: "" });
 const memberForm = reactive({ userId: "", role: "项目成员" });
 const milestoneForm = reactive({ name: "", owner: "项目负责人", status: "未开始", dueAt: "" });
 const copyForm = reactive({ open: false, name: "", copyMembers: true, copyMilestones: true, copySettings: true });
+const materialStatuses = ["待上传", "已上传", "已确认", "不适用"];
 const form = reactive<ProjectCreateInput & { open: boolean }>({
   open: false,
   name: "新建可研样本项目",
@@ -78,6 +82,23 @@ function statusTag(status?: string) {
 
 function statText(value: number, total: number) {
   return `${value}/${total}`;
+}
+
+function gateType(allowed?: boolean) {
+  return allowed ? "success" : "danger";
+}
+
+function gateSummary(blockers?: Array<{ message: string }>, warnings?: Array<{ message: string }>) {
+  const blockText = blockers?.map((item) => item.message).join("；") || "无阻断";
+  const warnText = warnings?.length ? `；提醒：${warnings.map((item) => item.message).join("；")}` : "";
+  return `${blockText}${warnText}`;
+}
+
+function materialStatusType(status?: string) {
+  if (status === "已确认") return "success";
+  if (status === "已上传") return "primary";
+  if (status === "不适用") return "info";
+  return "warning";
 }
 
 async function reload(selectId?: string) {
@@ -192,11 +213,38 @@ async function saveMilestone(item: ProjectMilestoneInfo) {
   await reload(profile.value.id);
 }
 
+async function initializePackage() {
+  if (!profile.value) return;
+  const updated = await initializeProjectPackage(profile.value.id);
+  profile.value = updated;
+  await store.refresh();
+  await reload(updated.id);
+  ElMessage.success("项目初始化包已生成/补齐");
+}
+
+async function saveMaterial(item: { id: string; status: string; sourceType?: string | null; sourceId?: string | null }) {
+  if (!profile.value) return;
+  await updateProjectMaterial(profile.value.id, item.id, { status: item.status, sourceType: item.sourceType || undefined, sourceId: item.sourceId || undefined });
+  await reload(profile.value.id);
+  ElMessage.success("资料清单状态已更新");
+}
+
+async function previewGate(targetStatus: string) {
+  if (!profile.value) return;
+  const gate = await loadProjectStatusGate(profile.value.id, targetStatus);
+  ElMessage({ type: gate.allowed ? "success" : "warning", message: `${targetStatus}门禁：${gateSummary(gate.blockers, gate.warnings)}` });
+}
+
 async function setStatus(status: string) {
   if (!profile.value) return;
-  await changeProjectStatus(profile.value.id, status, `项目中心变更为${status}`);
-  await store.refresh();
-  await reload(profile.value.id);
+  try {
+    await changeProjectStatus(profile.value.id, status, `项目中心变更为${status}`);
+    await store.refresh();
+    await reload(profile.value.id);
+    ElMessage.success(`项目已变更为${status}`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "项目状态门禁未通过");
+  }
 }
 
 function openCopyDialog() {
@@ -271,6 +319,7 @@ onMounted(() => reload());
             <small>章节 {{ statText(project.stats.approvedChapters, project.stats.chapters) }}</small>
             <small>成员 {{ project.stats.members }}</small>
             <small>里程碑 {{ statText(project.stats.completedMilestones, project.stats.milestones) }}</small>
+            <small>资料清单 {{ statText(project.stats.completedRequiredMaterials ?? 0, project.stats.requiredMaterials ?? 0) }}</small>
             <small>问题 {{ project.stats.openIssues }}</small>
           </div>
           <small>{{ project.owner }} · {{ project.phase }} · {{ project.confidentiality }}</small>
@@ -282,7 +331,7 @@ onMounted(() => reload());
   <el-drawer v-model="drawerOpen" size="62%" :title="profile ? `${profile.name}｜${profile.code}` : '项目详情'">
     <template v-if="profile">
       <div class="metric-grid" style="margin-bottom: 16px">
-        <el-card class="metric-card" shadow="never"><span>初始化</span><strong>{{ profile.initialization.ready ? '已就绪' : '待完善' }}</strong></el-card>
+        <el-card class="metric-card" shadow="never"><span>初始化包</span><strong>{{ profile.initialization.packageReady ? '已生成' : '待补齐' }}</strong></el-card>
         <el-card class="metric-card" shadow="never"><span>成员</span><strong>{{ profile.stats.members }}</strong></el-card>
         <el-card class="metric-card" shadow="never"><span>里程碑</span><strong>{{ statText(profile.stats.completedMilestones, profile.stats.milestones) }}</strong></el-card>
         <el-card class="metric-card" shadow="never"><span>阻断问题</span><strong>{{ profile.stats.blockingIssues }}</strong></el-card>
@@ -310,7 +359,10 @@ onMounted(() => reload());
           </el-form>
           <div class="topbar-actions">
             <el-button type="primary" :disabled="!profile.actions?.canEdit" @click="saveProfile">保存</el-button>
+            <el-button :disabled="!profile.actions?.canInitialize" @click="initializePackage">补齐初始化包</el-button>
+            <el-button @click="previewGate('已关闭')">关闭门禁</el-button>
             <el-button :disabled="!profile.actions?.canClose" @click="setStatus('已关闭')">关闭项目</el-button>
+            <el-button @click="previewGate('已归档')">归档门禁</el-button>
             <el-button :disabled="!profile.actions?.canArchive" @click="setStatus('已归档')">归档项目</el-button>
             <el-button :disabled="!profile.actions?.canReopen" @click="setStatus('进行中')">重新打开</el-button>
             <el-button :disabled="!profile.actions?.canCopy" @click="openCopyDialog">复制项目</el-button>
@@ -352,17 +404,70 @@ onMounted(() => reload());
           </el-table>
         </el-tab-pane>
 
-        <el-tab-pane label="初始化状态" name="init">
-          <el-descriptions border :column="2">
-            <el-descriptions-item label="成员已配置"><el-tag :type="profile.initialization.hasMembers ? 'success' : 'warning'">{{ profile.initialization.hasMembers ? '是' : '否' }}</el-tag></el-descriptions-item>
-            <el-descriptions-item label="里程碑已配置"><el-tag :type="profile.initialization.hasMilestones ? 'success' : 'warning'">{{ profile.initialization.hasMilestones ? '是' : '否' }}</el-tag></el-descriptions-item>
-            <el-descriptions-item label="模板已绑定"><el-tag :type="profile.initialization.hasTemplate ? 'success' : 'warning'">{{ profile.initialization.hasTemplate ? '是' : '否' }}</el-tag></el-descriptions-item>
-            <el-descriptions-item label="已有资料"><el-tag :type="profile.initialization.hasDocuments ? 'success' : 'info'">{{ profile.initialization.hasDocuments ? '是' : '否' }}</el-tag></el-descriptions-item>
-            <el-descriptions-item label="资料解析">{{ statText(profile.stats.parsedDocuments, profile.stats.documents) }}</el-descriptions-item>
-            <el-descriptions-item label="事实确认">{{ statText(profile.stats.confirmedFacts, profile.stats.facts) }}</el-descriptions-item>
-            <el-descriptions-item label="章节审核">{{ statText(profile.stats.approvedChapters, profile.stats.chapters) }}</el-descriptions-item>
-            <el-descriptions-item label="成果生成">{{ statText(profile.stats.generatedArtifacts, profile.stats.artifacts) }}</el-descriptions-item>
-          </el-descriptions>
+        <el-tab-pane label="初始化包与门禁" name="init">
+          <div class="toolbar">
+            <div>
+              <strong>初始化包</strong>
+              <p style="margin: 4px 0 0; color: #6b7c88">资料清单、事实框架、章节目录和成果项均由项目中心统一初始化。</p>
+            </div>
+            <el-button :disabled="!profile.actions?.canInitialize" type="primary" @click="initializePackage">生成/补齐初始化包</el-button>
+          </div>
+          <el-row :gutter="12" style="margin-bottom: 12px">
+            <el-col v-for="check in profile.initialization.checks ?? []" :key="check.key" :span="8">
+              <el-card shadow="never" class="metric-card">
+                <span>{{ check.label }}</span>
+                <strong><el-tag :type="check.passed ? 'success' : 'warning'">{{ check.passed ? '通过' : '待完善' }}</el-tag></strong>
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <el-alert v-if="profile.initialization.missing?.length" type="warning" show-icon :closable="false" style="margin-bottom: 12px">
+            <template #title>初始化包仍有 {{ profile.initialization.missing.length }} 项待完善：{{ profile.initialization.missing.map((item) => item.label).join('、') }}</template>
+          </el-alert>
+
+          <el-divider content-position="left">资料清单</el-divider>
+          <el-table :data="profile.materialRequirements ?? []" border>
+            <el-table-column prop="category" label="资料类别" width="120" />
+            <el-table-column prop="name" label="资料名称" min-width="260" />
+            <el-table-column label="必备" width="80"><template #default="scope"><el-tag :type="scope.row.required ? 'danger' : 'info'">{{ scope.row.required ? '必备' : '可选' }}</el-tag></template></el-table-column>
+            <el-table-column label="状态" width="150">
+              <template #default="scope">
+                <el-select v-model="scope.row.status" size="small">
+                  <el-option v-for="status in materialStatuses" :key="status" :label="status" :value="status" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="来源" width="180"><template #default="scope"><el-input v-model="scope.row.sourceId" size="small" placeholder="文档ID/说明" /></template></el-table-column>
+            <el-table-column label="操作" width="120"><template #default="scope"><el-button link type="primary" @click="saveMaterial(scope.row)">保存</el-button></template></el-table-column>
+          </el-table>
+
+          <el-divider content-position="left">状态门禁</el-divider>
+          <el-row :gutter="12">
+            <el-col :span="12">
+              <el-card shadow="never">
+                <div class="panel-title"><h2>关闭门禁</h2><el-tag :type="gateType(profile.statusGates?.close?.allowed)">{{ profile.statusGates?.close?.allowed ? '可关闭' : '阻断' }}</el-tag></div>
+                <p>{{ gateSummary(profile.statusGates?.close?.blockers, profile.statusGates?.close?.warnings) }}</p>
+                <el-tag v-for="item in profile.statusGates?.close?.blockers ?? []" :key="item.code" type="danger" style="margin: 0 6px 6px 0">{{ item.message }} {{ item.count ?? '' }}</el-tag>
+                <el-tag v-for="item in profile.statusGates?.close?.warnings ?? []" :key="item.code" type="warning" style="margin: 0 6px 6px 0">{{ item.message }} {{ item.count ?? '' }}</el-tag>
+              </el-card>
+            </el-col>
+            <el-col :span="12">
+              <el-card shadow="never">
+                <div class="panel-title"><h2>归档门禁</h2><el-tag :type="gateType(profile.statusGates?.archive?.allowed)">{{ profile.statusGates?.archive?.allowed ? '可归档' : '阻断' }}</el-tag></div>
+                <p>{{ gateSummary(profile.statusGates?.archive?.blockers, profile.statusGates?.archive?.warnings) }}</p>
+                <el-tag v-for="item in profile.statusGates?.archive?.blockers ?? []" :key="item.code" type="danger" style="margin: 0 6px 6px 0">{{ item.message }} {{ item.count ?? '' }}</el-tag>
+                <el-tag v-for="item in profile.statusGates?.archive?.warnings ?? []" :key="item.code" type="warning" style="margin: 0 6px 6px 0">{{ item.message }} {{ item.count ?? '' }}</el-tag>
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <el-divider content-position="left">初始化记录</el-divider>
+          <el-table :data="profile.initializationRecords ?? []" border empty-text="暂无初始化记录">
+            <el-table-column prop="packageVersion" label="版本" width="120" />
+            <el-table-column prop="status" label="状态" width="120" />
+            <el-table-column prop="createdBy" label="创建人" width="140" />
+            <el-table-column prop="createdAt" label="创建时间" min-width="200" />
+          </el-table>
         </el-tab-pane>
       </el-tabs>
     </template>

@@ -46,6 +46,37 @@ class ProjectMilestone(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
+
+
+class ProjectMaterialRequirement(Base):
+    __tablename__ = "project_material_requirements"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    category: Mapped[str] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(Text)
+    required: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'待上传'"))
+    source_type: Mapped[str | None] = mapped_column(Text)
+    source_id: Mapped[str | None] = mapped_column(Text)
+    sort_order: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class ProjectInitializationRecord(Base):
+    __tablename__ = "project_initialization_records"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    package_version: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'已初始化'"))
+    summary: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
 class ProjectDocument(Base):
     __tablename__ = "project_documents"
 

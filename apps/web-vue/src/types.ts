@@ -41,6 +41,53 @@ export interface ProjectMilestoneInfo {
   sortOrder: number;
 }
 
+export interface ProjectMaterialRequirement {
+  id: string;
+  projectId: string;
+  category: string;
+  name: string;
+  required: boolean;
+  status: "待上传" | "已上传" | "已确认" | "不适用" | string;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  sortOrder: number;
+}
+
+export interface ProjectInitializationCheck {
+  key: string;
+  label: string;
+  passed: boolean;
+  value?: unknown;
+  required?: unknown;
+}
+
+export interface ProjectInitializationRecord {
+  id: string;
+  projectId: string;
+  packageVersion: string;
+  status: string;
+  summary: Record<string, unknown>;
+  createdBy?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ProjectStatusGateItem {
+  code: string;
+  message: string;
+  count?: number;
+}
+
+export interface ProjectStatusGate {
+  targetStatus: string;
+  currentStatus: string;
+  allowed: boolean;
+  blockers: ProjectStatusGateItem[];
+  warnings: ProjectStatusGateItem[];
+  checks: Array<{ key: string; label: string; passed: boolean; count?: number }>;
+  dryRun?: boolean;
+}
+
 export interface ProjectStats {
   documents: number;
   parsedDocuments: number;
@@ -55,6 +102,10 @@ export interface ProjectStats {
   members: number;
   milestones: number;
   completedMilestones: number;
+  materialRequirements?: number;
+  requiredMaterials?: number;
+  completedRequiredMaterials?: number;
+  severeIssues?: number;
 }
 
 export interface ProjectInitialization {
@@ -62,7 +113,19 @@ export interface ProjectInitialization {
   hasMilestones: boolean;
   hasTemplate: boolean;
   hasDocuments: boolean;
+  hasMaterialList?: boolean;
+  hasFactFrame?: boolean;
+  hasChapterOutline?: boolean;
+  hasArtifactPlan?: boolean;
   ready: boolean;
+  packageReady?: boolean;
+  materialUploadReady?: boolean;
+  confirmedFacts?: number;
+  requiredMaterials?: number;
+  completedRequiredMaterials?: number;
+  checks?: ProjectInitializationCheck[];
+  missing?: ProjectInitializationCheck[];
+  packageVersion?: string;
 }
 
 export interface ProjectSummary extends Project {
@@ -70,13 +133,19 @@ export interface ProjectSummary extends Project {
   updatedAt?: string | null;
   stats: ProjectStats;
   initialization: ProjectInitialization;
+  initializationRecord?: ProjectInitializationRecord | null;
+  statusGate?: ProjectStatusGate;
 }
 
 export interface ProjectProfile extends ProjectSummary {
   members: ProjectMemberInfo[];
   milestones: ProjectMilestoneInfo[];
+  materialRequirements?: ProjectMaterialRequirement[];
+  initializationRecords?: ProjectInitializationRecord[];
+  statusGates?: { close?: ProjectStatusGate; archive?: ProjectStatusGate };
   actions?: {
     canEdit?: boolean;
+    canInitialize?: boolean;
     canClose?: boolean;
     canArchive?: boolean;
     canReopen?: boolean;
