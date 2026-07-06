@@ -7,21 +7,35 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    AppUser,
     Artifact,
     AuditLog,
     FactItem,
     InvestmentEstimate,
+    Notification,
     ParseJob,
     Project,
     ProjectDocument,
     QualityCheckJob,
     QualityIssue,
     ReportChapter,
+    ReviewTask,
+    WorkItem,
+)
+from app.services.workbench import (
+    ACTIVE_REVIEW_STATUSES,
+    ACTIVE_WORK_STATUSES,
+    apply_project_visibility,
+    ensure_workbench_state,
+    is_management_role,
+    map_notification,
+    map_review_task,
+    map_work_item,
+    visible_project_ids,
 )
 
 
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
-SEVERITY_PRIORITY = {"阻断": "P0", "严重": "P0", "一般": "P1", "提示": "P2"}
 
 
 def _percentage(done: int, total: int) -> int:
@@ -29,8 +43,7 @@ def _percentage(done: int, total: int) -> int:
 
 
 def _role_mode(role: str) -> str:
-    management_keywords = ("管理员", "负责人", "领导", "审核", "经理")
-    return "management" if any(keyword in role for keyword in management_keywords) else "personal"
+    return "management" if is_management_role(role) else "personal"
 
 
 def _normalise_task_status(status: str) -> str:
@@ -53,6 +66,31 @@ def _normalise_task_status(status: str) -> str:
     return mapping.get(status, status)
 
 
+def _task_progress(status: str) -> int:
+    if status in {"completed", "success", "已生成"}:
+        return 100
+    if status in {"failed", "error", "受阻", "cancelled", "revoked"}:
+        return 0
+    if status in {"running", "started", "生成中"}:
+        return 60
+    if status in {"queued", "pending"}:
+        return 15
+    return 5
+
+
+def _is_stuck(status: str, updated_at: datetime | None, threshold_minutes: int = 30) -> bool:
+    if status not in {"queued", "pending", "running", "started", "生成中"} or not updated_at:
+        return False
+    now = datetime.now(updated_at.tzinfo or timezone.utc)
+    return (now - updated_at).total_seconds() > threshold_minutes * 60
+
+
+def _iso(value: datetime | str | None) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
 def _activity_label(action: str) -> str:
     labels = {
         "create_project": "新建项目",
@@ -65,15 +103,26 @@ def _activity_label(action: str) -> str:
         "update_quality_issue": "处理质量问题",
         "run_quality_check": "执行质量检查",
         "queue_artifact_export": "提交成果导出",
+        "claim_work_item": "领取工作项",
+        "complete_work_item": "完成工作项",
+        "transfer_work_item": "转交工作项",
+        "approve_review_task": "通过审核任务",
+        "reject_review_task": "退回审核任务",
+        "read_notification": "已读通知",
+        "cancel_background_task": "取消后台任务",
+        "retry_background_task": "重试后台任务",
     }
     return labels.get(action, action.replace("_", " "))
 
 
 def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = None) -> dict[str, Any]:
-    all_projects = db.scalars(select(Project).order_by(Project.updated_at.desc(), Project.id)).all()
+    all_projects_raw = db.scalars(select(Project).order_by(Project.updated_at.desc(), Project.id)).all()
+    visibility = visible_project_ids(db, user)
+    all_projects = apply_project_visibility(all_projects_raw, visibility)
+
     if project_id:
         scoped_projects = [project for project in all_projects if project.id == project_id]
-        if not scoped_projects:
+        if not scoped_projects and all_projects:
             scoped_projects = all_projects[:1]
     else:
         scoped_projects = all_projects
@@ -87,20 +136,14 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             .where(ProjectDocument.project_id.in_(project_ids))
             .order_by(ProjectDocument.created_at.desc(), ProjectDocument.id)
         ).all()
-        facts = db.scalars(
-            select(FactItem).where(FactItem.project_id.in_(project_ids)).order_by(FactItem.id)
-        ).all()
+        facts = db.scalars(select(FactItem).where(FactItem.project_id.in_(project_ids)).order_by(FactItem.id)).all()
         chapters = db.scalars(
             select(ReportChapter)
             .where(ReportChapter.project_id.in_(project_ids))
             .order_by(ReportChapter.chapter_no)
         ).all()
-        issues = db.scalars(
-            select(QualityIssue).where(QualityIssue.project_id.in_(project_ids)).order_by(QualityIssue.id)
-        ).all()
-        artifacts = db.scalars(
-            select(Artifact).where(Artifact.project_id.in_(project_ids)).order_by(Artifact.id)
-        ).all()
+        issues = db.scalars(select(QualityIssue).where(QualityIssue.project_id.in_(project_ids)).order_by(QualityIssue.id)).all()
+        artifacts = db.scalars(select(Artifact).where(Artifact.project_id.in_(project_ids)).order_by(Artifact.id)).all()
         estimates = db.scalars(
             select(InvestmentEstimate)
             .where(InvestmentEstimate.project_id.in_(project_ids))
@@ -108,6 +151,40 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         ).all()
     else:
         documents, facts, chapters, issues, artifacts, estimates = [], [], [], [], [], []
+
+    ensure_workbench_state(db, user, project_by_id, documents, facts, chapters, issues, estimates)
+    db.commit()
+
+    users = db.scalars(select(AppUser).order_by(AppUser.id)).all()
+    users_by_id = {user_row.id: user_row for user_row in users}
+
+    work_stmt = select(WorkItem).where(WorkItem.status.in_(ACTIVE_WORK_STATUSES))
+    review_stmt = select(ReviewTask).where(ReviewTask.status.in_(ACTIVE_REVIEW_STATUSES))
+    notification_stmt = select(Notification).where(Notification.status == "未读")
+    if project_ids:
+        work_stmt = work_stmt.where(WorkItem.project_id.in_(project_ids))
+        review_stmt = review_stmt.where(ReviewTask.project_id.in_(project_ids))
+        notification_stmt = notification_stmt.where(Notification.project_id.in_(project_ids) | (Notification.project_id.is_(None)))
+    elif visibility is not None:
+        work_stmt = work_stmt.where(WorkItem.project_id.in_(project_ids))
+        review_stmt = review_stmt.where(ReviewTask.project_id.in_(project_ids))
+        notification_stmt = notification_stmt.where(Notification.project_id.in_(project_ids))
+
+    if not is_management_role(user.get("role")):
+        uid = user.get("id")
+        # Personal view: show unassigned, assigned-to-me, or items on visible projects.
+        work_stmt = work_stmt.where((WorkItem.assignee_id.is_(None)) | (WorkItem.assignee_id == uid))
+        review_stmt = review_stmt.where((ReviewTask.reviewer_id.is_(None)) | (ReviewTask.reviewer_id == uid))
+        notification_stmt = notification_stmt.where((Notification.user_id.is_(None)) | (Notification.user_id == uid))
+
+    work_items_rows = db.scalars(work_stmt.order_by(WorkItem.priority, WorkItem.updated_at.desc()).limit(50)).all()
+    review_rows = db.scalars(review_stmt.order_by(ReviewTask.priority, ReviewTask.updated_at.desc()).limit(30)).all()
+    note_rows = db.scalars(notification_stmt.order_by(Notification.created_at.desc()).limit(20)).all()
+
+    work_items = [map_work_item(item, project_by_id, users_by_id) for item in work_items_rows]
+    work_items.sort(key=lambda item: (PRIORITY_ORDER.get(item["priority"], 9), item["category"], item["title"]))
+    review_queue = [map_review_task(item, project_by_id, users_by_id) for item in review_rows]
+    review_queue.sort(key=lambda item: PRIORITY_ORDER.get(item["priority"], 9))
 
     document_by_id = {document.id: document for document in documents}
 
@@ -117,7 +194,7 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             select(ParseJob)
             .where(ParseJob.document_id.in_(list(document_by_id)))
             .order_by(ParseJob.created_at.desc())
-            .limit(20)
+            .limit(30)
         ).all()
 
     quality_jobs = []
@@ -126,117 +203,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             select(QualityCheckJob)
             .where(QualityCheckJob.project_id.in_(project_ids))
             .order_by(QualityCheckJob.created_at.desc())
-            .limit(20)
+            .limit(30)
         ).all()
-
-    unresolved_issues = [issue for issue in issues if issue.status != "已关闭"]
-    blockers = [issue for issue in unresolved_issues if issue.severity in {"阻断", "严重"}]
-    pending_reviews = [chapter for chapter in chapters if chapter.status == "待审核"]
-    pending_estimate_reviews = [estimate for estimate in estimates if estimate.status == "calculated"]
-
-    work_items: list[dict[str, Any]] = []
-    for document in documents:
-        if document.parse_status != "已解析":
-            work_items.append(
-                {
-                    "id": f"document:{document.id}",
-                    "category": "资料解析",
-                    "title": f"解析《{document.name}》",
-                    "projectId": document.project_id,
-                    "projectName": project_by_id[document.project_id].name,
-                    "owner": "资料管理员",
-                    "priority": "P1" if document.parse_status != "需复核" else "P0",
-                    "status": document.parse_status,
-                    "route": "/documents",
-                    "detail": f"{document.category} · {document.version}",
-                }
-            )
-
-    for fact in facts:
-        if fact.status in {"待确认", "有冲突"}:
-            work_items.append(
-                {
-                    "id": f"fact:{fact.id}",
-                    "category": "事实确认",
-                    "title": f"{fact.name}：{fact.value}{fact.unit or ''}",
-                    "projectId": fact.project_id,
-                    "projectName": project_by_id[fact.project_id].name,
-                    "owner": fact.owner,
-                    "priority": "P0" if fact.status == "有冲突" else "P1",
-                    "status": fact.status,
-                    "route": "/facts",
-                    "detail": fact.source,
-                }
-            )
-
-    for chapter in chapters:
-        if chapter.status in {"未开始", "编制中"}:
-            work_items.append(
-                {
-                    "id": f"chapter:{chapter.id}",
-                    "category": "章节编制",
-                    "title": f"{chapter.chapter_no} {chapter.title}",
-                    "projectId": chapter.project_id,
-                    "projectName": project_by_id[chapter.project_id].name,
-                    "owner": chapter.owner,
-                    "priority": "P1" if chapter.quality in {"阻断", "严重"} else "P2",
-                    "status": chapter.status,
-                    "route": "/report",
-                    "detail": f"引用 {chapter.citation_count} 条 · 质量级别 {chapter.quality}",
-                }
-            )
-
-    for issue in unresolved_issues:
-        work_items.append(
-            {
-                "id": f"issue:{issue.id}",
-                "category": "质量问题",
-                "title": issue.title,
-                "projectId": issue.project_id,
-                "projectName": project_by_id[issue.project_id].name,
-                "owner": issue.owner,
-                "priority": SEVERITY_PRIORITY.get(issue.severity, "P2"),
-                "status": issue.status,
-                "route": "/quality",
-                "detail": f"{issue.severity} · {issue.type}",
-            }
-        )
-
-    work_items.sort(key=lambda item: (PRIORITY_ORDER.get(item["priority"], 9), item["category"], item["title"]))
-
-    review_queue: list[dict[str, Any]] = []
-    for chapter in pending_reviews:
-        review_queue.append(
-            {
-                "id": chapter.id,
-                "type": "章节审核",
-                "title": f"{chapter.chapter_no} {chapter.title}",
-                "projectId": chapter.project_id,
-                "projectName": project_by_id[chapter.project_id].name,
-                "submitter": chapter.owner,
-                "priority": "P0" if chapter.quality in {"阻断", "严重"} else "P1",
-                "status": chapter.status,
-                "route": "/report",
-                "description": f"当前引用 {chapter.citation_count} 条，质量级别 {chapter.quality}",
-            }
-        )
-    for estimate in pending_estimate_reviews:
-        project = project_by_id[estimate.project_id]
-        review_queue.append(
-            {
-                "id": estimate.id,
-                "type": "投资测算确认",
-                "title": f"{project.name}投资估算结果",
-                "projectId": estimate.project_id,
-                "projectName": project.name,
-                "submitter": "投资测算引擎",
-                "priority": "P1",
-                "status": "待确认",
-                "route": "/analysis",
-                "description": "测算已完成，待专业人员确认后用于正式成果。",
-            }
-        )
-    review_queue.sort(key=lambda item: PRIORITY_ORDER.get(item["priority"], 9))
 
     tasks: list[dict[str, Any]] = []
     for job in parse_jobs:
@@ -244,34 +212,46 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         if not document:
             continue
         project = project_by_id.get(document.project_id)
+        updated_at = job.updated_at or job.created_at
         tasks.append(
             {
                 "id": job.id,
+                "taskKind": "parse",
                 "type": "资料解析",
                 "name": document.name,
                 "projectId": document.project_id,
                 "projectName": project.name if project else "未知项目",
                 "status": _normalise_task_status(job.status),
+                "rawStatus": job.status,
                 "message": job.message,
-                "progress": 100 if job.status == "completed" else 15 if job.status == "queued" else 55,
-                "updatedAt": (job.updated_at or job.created_at).isoformat() if (job.updated_at or job.created_at) else None,
+                "progress": _task_progress(job.status),
+                "updatedAt": _iso(updated_at),
                 "route": "/documents",
+                "stuck": _is_stuck(job.status, updated_at),
+                "canCancel": job.status in {"queued", "pending", "running", "started"},
+                "canRetry": job.status in {"failed", "error", "cancelled", "revoked"},
             }
         )
     for job in quality_jobs:
         project = project_by_id.get(job.project_id or "")
+        updated_at = job.updated_at or job.created_at
         tasks.append(
             {
                 "id": job.id,
+                "taskKind": "quality",
                 "type": "质量检查",
                 "name": "项目质量检查",
                 "projectId": job.project_id,
                 "projectName": project.name if project else "全部项目",
                 "status": _normalise_task_status(job.status),
+                "rawStatus": job.status,
                 "message": job.message,
-                "progress": 100 if job.status == "completed" else 15 if job.status == "queued" else 55,
-                "updatedAt": (job.updated_at or job.created_at).isoformat() if (job.updated_at or job.created_at) else None,
+                "progress": _task_progress(job.status),
+                "updatedAt": _iso(updated_at),
                 "route": "/quality",
+                "stuck": _is_stuck(job.status, updated_at),
+                "canCancel": job.status in {"queued", "pending", "running", "started"},
+                "canRetry": job.status in {"failed", "error", "cancelled", "revoked"},
             }
         )
     for artifact in artifacts:
@@ -280,23 +260,31 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         tasks.append(
             {
                 "id": artifact.id,
+                "taskKind": "artifact",
                 "type": "成果导出",
                 "name": artifact.name,
                 "projectId": artifact.project_id,
                 "projectName": project_by_id[artifact.project_id].name,
                 "status": _normalise_task_status(artifact.status),
+                "rawStatus": artifact.status,
                 "message": "成果正在生成" if artifact.status == "生成中" else "成果生成受阻，请处理质量问题后重试",
-                "progress": 60 if artifact.status == "生成中" else 0,
+                "progress": _task_progress(artifact.status),
                 "updatedAt": artifact.updated_at,
                 "route": "/artifacts",
+                "stuck": False,
+                "canCancel": artifact.status == "生成中",
+                "canRetry": artifact.status == "受阻",
             }
         )
-    tasks.sort(key=lambda item: (0 if item["status"] in {"失败", "运行中", "排队中"} else 1, item.get("updatedAt") or ""), reverse=False)
-    tasks = tasks[:12]
+    tasks.sort(key=lambda item: (0 if item["status"] in {"失败", "运行中", "排队中"} else 1, item.get("updatedAt") or ""))
+    tasks = tasks[:16]
 
+    unresolved_issues = [issue for issue in issues if issue.status != "已关闭"]
+    blockers = [issue for issue in unresolved_issues if issue.severity in {"阻断", "严重"}]
     generated_artifacts = [artifact for artifact in artifacts if artifact.status == "已生成"]
     running_tasks = [task for task in tasks if task["status"] in {"排队中", "运行中"}]
     failed_tasks = [task for task in tasks if task["status"] == "失败"]
+    stuck_tasks = [task for task in tasks if task.get("stuck")]
 
     avg_project_progress = round(sum(project.progress for project in scoped_projects) / len(scoped_projects)) if scoped_projects else 0
     metrics = [
@@ -323,7 +311,7 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             "label": "待审核/确认",
             "value": len(review_queue),
             "unit": "项",
-            "description": "章节与专业测算确认",
+            "description": "章节、投资测算与专业复核",
             "tone": "warning" if review_queue else "success",
             "route": "/report",
         },
@@ -341,8 +329,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             "label": "运行中任务",
             "value": len(running_tasks),
             "unit": "个",
-            "description": f"失败任务 {len(failed_tasks)} 个",
-            "tone": "info" if running_tasks else "success",
+            "description": f"失败 {len(failed_tasks)} 个，疑似卡住 {len(stuck_tasks)} 个",
+            "tone": "danger" if stuck_tasks or failed_tasks else "info" if running_tasks else "success",
             "route": "/dashboard",
         },
         {
@@ -422,47 +410,18 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             }
         )
 
-    notifications: list[dict[str, Any]] = []
-    if blockers:
-        notifications.append(
+    notifications = [map_notification(item) for item in note_rows]
+    if stuck_tasks:
+        notifications.insert(
+            0,
             {
-                "id": "blocking-issues",
+                "id": "stuck-tasks",
                 "level": "danger",
-                "title": f"存在 {len(blockers)} 项严重或阻断问题",
-                "message": "正式成果发布前必须处理并复检。",
-                "route": "/quality",
-            }
-        )
-    if pending_reviews:
-        notifications.append(
-            {
-                "id": "pending-reviews",
-                "level": "warning",
-                "title": f"有 {len(pending_reviews)} 个章节等待审核",
-                "message": "请专业审核人及时处理，避免影响项目里程碑。",
-                "route": "/report",
-            }
-        )
-    if failed_tasks:
-        notifications.append(
-            {
-                "id": "failed-tasks",
-                "level": "danger",
-                "title": f"有 {len(failed_tasks)} 个后台任务失败",
-                "message": "请查看任务信息，修复数据或服务后重新执行。",
+                "title": f"有 {len(stuck_tasks)} 个任务疑似卡住",
+                "message": "请在异步任务中心取消或重试。",
                 "route": "/dashboard",
-            }
-        )
-    unparsed_count = sum(1 for document in documents if document.parse_status != "已解析")
-    if unparsed_count:
-        notifications.append(
-            {
-                "id": "unparsed-documents",
-                "level": "info",
-                "title": f"仍有 {unparsed_count} 份资料未完成解析",
-                "message": "未解析资料不会进入事实抽取和章节引用。",
-                "route": "/documents",
-            }
+                "status": "未读",
+            },
         )
     if not notifications:
         notifications.append(
@@ -472,9 +431,11 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
                 "title": "当前没有高优先级提醒",
                 "message": "项目流程运行正常，可继续推进下一阶段。",
                 "route": "/dashboard",
+                "status": "已读",
             }
         )
 
+    activity_project_filter = list(project_by_id)
     activity_query = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(12)
     recent_logs = db.scalars(activity_query).all()
     recent_activities = [
@@ -501,7 +462,7 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         "workItems": work_items[:20],
         "reviewQueue": review_queue[:12],
         "tasks": tasks,
-        "notifications": notifications[:8],
+        "notifications": notifications[:12],
         "recentActivities": recent_activities,
         "quickActions": [
             {"key": "upload", "label": "上传项目资料", "description": "补充资料并进入解析", "route": "/documents"},
@@ -509,4 +470,12 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             {"key": "chapter", "label": "继续章节编制", "description": "生成初稿并完善引用", "route": "/report"},
             {"key": "quality", "label": "执行质量检查", "description": "检查发布门禁与一致性", "route": "/quality"},
         ],
+        "capabilities": {
+            "persistentWorkItems": True,
+            "persistentReviewTasks": True,
+            "persistentNotifications": True,
+            "taskCancelRetry": True,
+            "stuckDetection": True,
+            "projectMemberFilter": True,
+        },
     }

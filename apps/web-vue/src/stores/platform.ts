@@ -3,7 +3,11 @@ import { computed, ref } from "vue";
 import { ElMessage } from "element-plus";
 import type { AppUser, BootstrapPayload, DashboardPayload, FactItem, InvestmentEstimate, PlatformStatus, ProjectDocument, QualityIssue, ReportChapter } from "../types";
 import {
+  approveReviewTask,
   calculateInvestmentEstimate,
+  cancelBackgroundTask,
+  claimWorkItem,
+  completeWorkItem,
   confirmInvestmentEstimate,
   createDocument,
   createProject,
@@ -16,7 +20,10 @@ import {
   loadPlatformStatus,
   login,
   logout,
+  markNotificationRead,
+  rejectReviewTask,
   requestArtifactExport,
+  retryBackgroundTask,
   runDocumentParse,
   updateChapter,
   updateFact,
@@ -221,6 +228,35 @@ export const usePlatformStore = defineStore("platform", () => {
     });
   }
 
+
+  function claimDashboardWorkItem(id: string) {
+    return runAction("领取工作项", () => claimWorkItem(id));
+  }
+
+  function completeDashboardWorkItem(id: string) {
+    return runAction("完成工作项", () => completeWorkItem(id));
+  }
+
+  function approveDashboardReviewTask(id: string) {
+    return runAction("审核通过", () => approveReviewTask(id));
+  }
+
+  function rejectDashboardReviewTask(id: string) {
+    return runAction("审核退回", () => rejectReviewTask(id, "请修改后重新提交审核。"));
+  }
+
+  function readDashboardNotification(id: string) {
+    return runAction("通知已读", () => markNotificationRead(id));
+  }
+
+  function cancelDashboardTask(id: string, taskKind: "parse" | "quality" | "artifact") {
+    return runAction("取消任务", () => cancelBackgroundTask(id, taskKind));
+  }
+
+  function retryDashboardTask(id: string, taskKind: "parse" | "quality" | "artifact") {
+    return runAction("重试任务", () => retryBackgroundTask(id, taskKind));
+  }
+
   return {
     data,
     loading,
@@ -259,6 +295,13 @@ export const usePlatformStore = defineStore("platform", () => {
     exportArtifact,
     fetchInvestmentEstimate,
     runInvestmentCalculation,
-    confirmInvestment
+    confirmInvestment,
+    claimDashboardWorkItem,
+    completeDashboardWorkItem,
+    approveDashboardReviewTask,
+    rejectDashboardReviewTask,
+    readDashboardNotification,
+    cancelDashboardTask,
+    retryDashboardTask
   };
 });

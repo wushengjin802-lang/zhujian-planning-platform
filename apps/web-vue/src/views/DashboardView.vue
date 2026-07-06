@@ -224,6 +224,12 @@ watch(
               <strong>{{ notice.title }}</strong>
               <small>{{ notice.message }}</small>
             </span>
+            <el-button
+              v-if="notice.id !== 'all-clear' && notice.id !== 'stuck-tasks'"
+              link
+              type="primary"
+              @click.stop="store.readDashboardNotification(notice.id)"
+            >已读</el-button>
             <el-icon><Right /></el-icon>
           </button>
         </el-card>
@@ -254,8 +260,12 @@ watch(
                 <strong>{{ item.title }}</strong>
                 <small>{{ item.projectName }} · {{ item.category }} · {{ item.detail }}</small>
               </span>
-              <span class="work-owner">{{ item.owner }}</span>
+              <span class="work-owner">{{ item.assigneeName || item.owner }}</span>
               <el-tag :type="statusType(item.status)" effect="plain" size="small">{{ item.status }}</el-tag>
+              <span class="work-actions">
+                <el-button v-if="item.status !== '处理中'" link type="primary" @click.stop="store.claimDashboardWorkItem(item.id)">领取</el-button>
+                <el-button link type="success" @click.stop="store.completeDashboardWorkItem(item.id)">完成</el-button>
+              </span>
               <el-icon><Right /></el-icon>
             </button>
             <el-empty v-if="!dashboard.workItems.length" description="当前没有待办事项" :image-size="70" />
@@ -274,8 +284,12 @@ watch(
                 <strong>{{ item.title }}</strong>
                 <small>{{ item.projectName }} · {{ item.type }} · {{ item.description }}</small>
               </span>
-              <span class="work-owner">{{ item.submitter }}</span>
+              <span class="work-owner">{{ item.reviewerName || item.submitter }}</span>
               <el-tag type="warning" effect="plain" size="small">{{ item.status }}</el-tag>
+              <span class="work-actions">
+                <el-button link type="success" @click.stop="store.approveDashboardReviewTask(item.id)">通过</el-button>
+                <el-button link type="warning" @click.stop="store.rejectDashboardReviewTask(item.id)">退回</el-button>
+              </span>
               <el-icon><Right /></el-icon>
             </button>
             <el-empty v-if="!dashboard.reviewQueue.length" description="当前没有待审核事项" :image-size="70" />
@@ -342,14 +356,16 @@ watch(
             </el-table-column>
             <el-table-column label="状态" width="90">
               <template #default="{ row }">
-                <el-tag :type="statusType(row.status)" size="small">{{ row.status }}</el-tag>
+                <el-tag :type="row.stuck ? 'danger' : statusType(row.status)" size="small">{{ row.stuck ? '疑似卡住' : row.status }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="更新时间" width="120">
               <template #default="{ row }">{{ formatTime(row.updatedAt) }}</template>
             </el-table-column>
-            <el-table-column width="72" align="right">
+            <el-table-column label="操作" width="145" align="right">
               <template #default="{ row }">
+                <el-button v-if="row.canCancel" link type="warning" @click="store.cancelDashboardTask(row.id, row.taskKind)">取消</el-button>
+                <el-button v-if="row.canRetry || row.stuck" link type="danger" @click="store.retryDashboardTask(row.id, row.taskKind)">重试</el-button>
                 <el-button link type="primary" @click="openRoute(row.route, row.projectId)">查看</el-button>
               </template>
             </el-table-column>
@@ -650,7 +666,7 @@ watch(
 .notice-item {
   display: grid;
   width: 100%;
-  grid-template-columns: 30px 1fr 20px;
+  grid-template-columns: 30px 1fr auto 20px;
   gap: 10px;
   align-items: center;
   margin-bottom: 9px;
@@ -697,7 +713,7 @@ watch(
 .work-row {
   display: grid;
   width: 100%;
-  grid-template-columns: 38px minmax(0, 1fr) 95px 82px 18px;
+  grid-template-columns: 38px minmax(0, 1fr) 95px 82px 112px 18px;
   gap: 10px;
   align-items: center;
   padding: 12px 4px;
@@ -731,6 +747,13 @@ watch(
   color: #81909a;
   font-size: 12px;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-actions {
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: 4px;
   white-space: nowrap;
 }
 
@@ -856,6 +879,7 @@ watch(
   }
 
   .work-owner,
+  .work-actions,
   .work-row > .el-tag:nth-of-type(2) {
     display: none;
   }

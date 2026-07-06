@@ -202,39 +202,57 @@ export interface DashboardWorkItem {
   id: string;
   category: string;
   title: string;
-  projectId: string;
+  projectId?: string | null;
   projectName: string;
   owner: string;
+  assigneeId?: string | null;
+  assigneeName?: string | null;
   priority: "P0" | "P1" | "P2" | "P3";
   status: string;
   route: string;
   detail: string;
+  dueAt?: string | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  persistent?: boolean;
 }
 
 export interface DashboardReviewItem {
   id: string;
   type: string;
   title: string;
-  projectId: string;
+  projectId?: string | null;
   projectName: string;
   submitter: string;
+  reviewerId?: string | null;
+  reviewerName?: string | null;
   priority: "P0" | "P1" | "P2" | "P3";
   status: string;
   route: string;
   description: string;
+  targetType?: string;
+  targetId?: string;
+  decision?: string | null;
+  comment?: string | null;
+  persistent?: boolean;
 }
 
 export interface DashboardTask {
   id: string;
+  taskKind: "parse" | "quality" | "artifact";
   type: string;
   name: string;
   projectId?: string | null;
   projectName: string;
   status: string;
+  rawStatus?: string;
   message: string;
   progress: number;
   updatedAt?: string | null;
   route: string;
+  stuck?: boolean;
+  canCancel?: boolean;
+  canRetry?: boolean;
 }
 
 export interface DashboardNotification {
@@ -243,6 +261,11 @@ export interface DashboardNotification {
   title: string;
   message: string;
   route: string;
+  status?: string;
+  projectId?: string | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  createdAt?: string | null;
 }
 
 export interface DashboardActivity {
@@ -269,4 +292,5 @@ export interface DashboardPayload {
   notifications: DashboardNotification[];
   recentActivities: DashboardActivity[];
   quickActions: Array<{ key: string; label: string; description: string; route: string }>;
+  capabilities?: Record<string, boolean>;
 }

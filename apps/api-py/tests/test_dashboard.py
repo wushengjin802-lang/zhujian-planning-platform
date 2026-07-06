@@ -14,6 +14,10 @@ from app.db.models import (
     QualityCheckJob,
     QualityIssue,
     ReportChapter,
+    WorkItem,
+    ReviewTask,
+    Notification,
+    AppUser,
 )
 from app.services.dashboard import build_dashboard
 
@@ -33,6 +37,17 @@ class FakeSession:
     def scalars(self, statement):
         entity = statement.column_descriptions[0].get("entity")
         return ScalarRows(self.rows_by_model.get(entity, []))
+
+    def scalar(self, statement):
+        entity = statement.column_descriptions[0].get("entity")
+        rows = self.rows_by_model.get(entity, [])
+        return rows[0] if rows else None
+
+    def add(self, row):
+        self.rows_by_model.setdefault(type(row), []).append(row)
+
+    def commit(self):
+        return None
 
 
 class DashboardAggregationTest(unittest.TestCase):
@@ -77,6 +92,10 @@ class DashboardAggregationTest(unittest.TestCase):
             ParseJob: [parse_job],
             QualityCheckJob: [quality_job],
             AuditLog: [audit],
+            WorkItem: [],
+            ReviewTask: [],
+            Notification: [],
+            AppUser: [],
         })
 
         result = build_dashboard(db, {"id": "U1", "name": "项目负责人", "role": "项目负责人", "department": "咨询部", "status": "启用"}, "P001")
@@ -87,6 +106,8 @@ class DashboardAggregationTest(unittest.TestCase):
         self.assertEqual(len(result["reviewQueue"]), 2)
         self.assertTrue(any(item["priority"] == "P0" for item in result["workItems"]))
         self.assertTrue(any(item["status"] == "运行中" for item in result["tasks"]))
+        self.assertTrue(result["capabilities"]["persistentWorkItems"])
+        self.assertTrue(any(item.get("persistent") for item in result["workItems"]))
         blocker_metric = next(item for item in result["metrics"] if item["key"] == "blockingIssues")
         self.assertEqual(blocker_metric["value"], 1)
         self.assertEqual(result["workflow"][0]["percentage"], 0)

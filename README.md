@@ -85,3 +85,29 @@ npm run build
 ## 第一阶段边界
 
 本阶段聚焦正式咨询成果编制闭环。方案决策、冻结后变更和效果图任务书保留产品入口与数据结构，完整能力放入第三阶段。
+
+
+## 2026-07-06 工作台边界能力完善
+
+在上一版工作台增强基础上，新增持久化 `work_items`、`review_tasks`、`notifications`，并补充工作项领取/完成/转交、审核通过/退回、通知已读、异步任务取消/重试、疑似卡住检测和项目成员可见性过滤。
+
+新增接口：
+
+```text
+POST /api/work-items/{item_id}/claim
+POST /api/work-items/{item_id}/complete
+POST /api/work-items/{item_id}/transfer
+POST /api/review-tasks/{task_id}/approve
+POST /api/review-tasks/{task_id}/reject
+POST /api/notifications/{notification_id}/read
+POST /api/tasks/{task_id}/cancel
+POST /api/tasks/{task_id}/retry
+```
+
+新增迁移：
+
+```text
+apps/api-py/alembic/versions/20260706_0004_workbench_boundary_models.py
+```
+
+详见：`docs/00_project/工作台边界能力完善说明_20260706.md`。

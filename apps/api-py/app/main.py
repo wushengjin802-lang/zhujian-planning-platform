@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
@@ -28,12 +29,17 @@ from app.db.models import (
     QualityRule,
     ReportChapter,
     ReportTemplate,
+    Notification,
+    ProjectMember,
+    ReviewTask,
+    WorkItem,
 )
 from app.db.session import get_db
 from app.services.artifacts import generate_artifact
 from app.services.auth import authenticate_user, get_session_user, logout_session
 from app.services.capabilities import platform_status
 from app.services.dashboard import build_dashboard
+from app.services.workbench import assert_project_visible
 from app.services.documents import parse_document
 from app.services.estimates import calculate_estimate, confirm_estimate, get_estimate, map_estimate
 from app.services.jobs import enqueue_or_run
@@ -102,6 +108,20 @@ class ModelGenerateRequest(BaseModel):
     context: list[dict] = []
 
 
+class WorkItemAction(BaseModel):
+    assigneeId: str | None = None
+    comment: str | None = None
+
+
+class ReviewAction(BaseModel):
+    comment: str | None = None
+
+
+class TaskAction(BaseModel):
+    taskKind: str
+
+
+
 def bearer_token(authorization: Annotated[str | None, Header()] = None) -> str | None:
     if authorization and authorization.startswith("Bearer "):
         return authorization.removeprefix("Bearer ")
@@ -147,6 +167,259 @@ def model_gateway_generate(payload: ModelGenerateRequest, _: dict = Depends(curr
 @app.get("/api/dashboard")
 def dashboard(projectId: str | None = None, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     return build_dashboard(db, user, projectId)
+
+
+
+
+@app.post("/api/work-items/{item_id}/claim")
+def claim_work_item(item_id: str, payload: WorkItemAction | None = None, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    item = db.get(WorkItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Work item not found")
+    try:
+        assert_project_visible(db, user, item.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if item.status in {"已完成", "已取消"}:
+        raise HTTPException(status_code=409, detail="Work item is already closed")
+    assignee_id = (payload.assigneeId if payload else None) or user["id"]
+    item.assignee_id = assignee_id
+    item.status = "处理中"
+    item.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "claim_work_item", "work_item", item_id, {"assigneeId": assignee_id})
+    db.commit()
+    return {"id": item.id, "status": item.status, "assigneeId": item.assignee_id}
+
+
+@app.post("/api/work-items/{item_id}/complete")
+def complete_work_item(item_id: str, payload: WorkItemAction | None = None, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    item = db.get(WorkItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Work item not found")
+    try:
+        assert_project_visible(db, user, item.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if item.status in {"已完成", "已取消"}:
+        return {"id": item.id, "status": item.status}
+    item.status = "已完成"
+    item.assignee_id = item.assignee_id or user["id"]
+    item.completed_at = datetime.now(timezone.utc)
+    item.updated_at = item.completed_at
+    write_audit(db, user["name"], "complete_work_item", "work_item", item_id, {"comment": payload.comment if payload else None})
+    db.commit()
+    return {"id": item.id, "status": item.status}
+
+
+@app.post("/api/work-items/{item_id}/transfer")
+def transfer_work_item(item_id: str, payload: WorkItemAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    if not payload.assigneeId:
+        raise HTTPException(status_code=400, detail="assigneeId is required")
+    item = db.get(WorkItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Work item not found")
+    try:
+        assert_project_visible(db, user, item.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    target = db.get(AppUser, payload.assigneeId)
+    if not target or target.status != "启用":
+        raise HTTPException(status_code=404, detail="Target user not found or disabled")
+    item.assignee_id = payload.assigneeId
+    item.status = "待处理"
+    item.updated_at = datetime.now(timezone.utc)
+    write_audit(db, user["name"], "transfer_work_item", "work_item", item_id, {"assigneeId": payload.assigneeId, "comment": payload.comment})
+    db.commit()
+    return {"id": item.id, "status": item.status, "assigneeId": item.assignee_id}
+
+
+@app.post("/api/review-tasks/{task_id}/approve")
+def approve_review_task(task_id: str, payload: ReviewAction | None = None, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    task = db.get(ReviewTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Review task not found")
+    try:
+        assert_project_visible(db, user, task.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    task.status = "已通过"
+    task.reviewer_id = task.reviewer_id or user["id"]
+    task.decision = "approved"
+    task.comment = payload.comment if payload else None
+    task.decided_at = datetime.now(timezone.utc)
+    task.updated_at = task.decided_at
+    if task.target_type == "report_chapter":
+        chapter = db.get(ReportChapter, task.target_id)
+        if chapter:
+            chapter.status = "已审核"
+    elif task.target_type == "investment_estimate":
+        estimate = db.get(InvestmentEstimate, task.target_id)
+        if estimate:
+            estimate.status = "confirmed"
+            estimate.confirmed_by = user["name"]
+            estimate.confirmed_at = task.decided_at
+            estimate.updated_at = task.decided_at
+    write_audit(db, user["name"], "approve_review_task", "review_task", task_id, {"targetType": task.target_type, "targetId": task.target_id, "comment": task.comment})
+    db.commit()
+    return {"id": task.id, "status": task.status, "decision": task.decision}
+
+
+@app.post("/api/review-tasks/{task_id}/reject")
+def reject_review_task(task_id: str, payload: ReviewAction | None = None, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    task = db.get(ReviewTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Review task not found")
+    try:
+        assert_project_visible(db, user, task.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    task.status = "已退回"
+    task.reviewer_id = task.reviewer_id or user["id"]
+    task.decision = "rejected"
+    task.comment = payload.comment if payload else "请修改后重新提交审核。"
+    task.decided_at = datetime.now(timezone.utc)
+    task.updated_at = task.decided_at
+    if task.target_type == "report_chapter":
+        chapter = db.get(ReportChapter, task.target_id)
+        if chapter:
+            chapter.status = "编制中"
+    elif task.target_type == "investment_estimate":
+        estimate = db.get(InvestmentEstimate, task.target_id)
+        if estimate:
+            estimate.status = "draft"
+            estimate.updated_at = task.decided_at
+    db.add(Notification(
+        id=f"NT-{int(time.time() * 1000)}",
+        user_id=None,
+        project_id=task.project_id,
+        level="warning",
+        title=f"审核退回：{task.title}",
+        message=task.comment,
+        route=task.route,
+        source_type="review_task",
+        source_id=task.id,
+        status="未读",
+    ))
+    write_audit(db, user["name"], "reject_review_task", "review_task", task_id, {"targetType": task.target_type, "targetId": task.target_id, "comment": task.comment})
+    db.commit()
+    return {"id": task.id, "status": task.status, "decision": task.decision, "comment": task.comment}
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    note = db.get(Notification, notification_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    try:
+        assert_project_visible(db, user, note.project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if note.user_id and note.user_id != user["id"]:
+        raise HTTPException(status_code=403, detail="Notification belongs to another user")
+    note.status = "已读"
+    note.read_at = datetime.now(timezone.utc)
+    note.updated_at = note.read_at
+    write_audit(db, user["name"], "read_notification", "notification", notification_id, {})
+    db.commit()
+    return {"id": note.id, "status": note.status}
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_background_task(task_id: str, payload: TaskAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    now = datetime.now(timezone.utc)
+    if payload.taskKind == "parse":
+        job = db.get(ParseJob, task_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Parse job not found")
+        document = db.get(ProjectDocument, job.document_id) if job.document_id else None
+        try:
+            assert_project_visible(db, user, document.project_id if document else None)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        job.status = "cancelled"
+        job.message = "用户取消解析任务。"
+        job.updated_at = now
+        if document and document.parse_status != "已解析":
+            document.parse_status = "需复核"
+            document.updated_at = current_day(db)
+    elif payload.taskKind == "quality":
+        job = db.get(QualityCheckJob, task_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Quality check job not found")
+        try:
+            assert_project_visible(db, user, job.project_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        job.status = "cancelled"
+        job.message = "用户取消质量检查任务。"
+        job.updated_at = now
+    elif payload.taskKind == "artifact":
+        artifact = db.get(Artifact, task_id)
+        if not artifact:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        try:
+            assert_project_visible(db, user, artifact.project_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        artifact.status = "受阻"
+        artifact.updated_at = current_day(db)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported taskKind")
+    write_audit(db, user["name"], "cancel_background_task", payload.taskKind, task_id, {})
+    db.commit()
+    return {"id": task_id, "taskKind": payload.taskKind, "status": "cancelled"}
+
+
+@app.post("/api/tasks/{task_id}/retry", status_code=202)
+def retry_background_task(task_id: str, payload: TaskAction, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    if payload.taskKind == "parse":
+        old_job = db.get(ParseJob, task_id)
+        if not old_job or not old_job.document_id:
+            raise HTTPException(status_code=404, detail="Parse job not found")
+        document = db.get(ProjectDocument, old_job.document_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        try:
+            assert_project_visible(db, user, document.project_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        job = ParseJob(id=f"JOB-{int(time.time() * 1000)}", document_id=document.id, status="queued", message=f"由 {task_id} 重试创建。", result={})
+        document.parse_status = "解析中"
+        document.updated_at = current_day(db)
+        db.add(job)
+        db.commit()
+        result = enqueue_or_run(parse_document_task, (document.id, job.id), lambda: parse_document(db, document.id, job.id) or {"status": "not_found"})
+        write_audit(db, user["name"], "retry_background_task", "parse", job.id, {"retryOf": task_id})
+        db.commit()
+        return {"id": job.id, "taskKind": "parse", "status": "queued", **result}
+    if payload.taskKind == "quality":
+        old_job = db.get(QualityCheckJob, task_id)
+        if not old_job:
+            raise HTTPException(status_code=404, detail="Quality check job not found")
+        try:
+            assert_project_visible(db, user, old_job.project_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        result = enqueue_or_run(quality_check_task, (old_job.project_id,), lambda: run_quality_check(db, old_job.project_id))
+        write_audit(db, user["name"], "retry_background_task", "quality", task_id, {"projectId": old_job.project_id})
+        db.commit()
+        return {"id": result.get("taskId", task_id), "taskKind": "quality", "status": "queued", **result}
+    if payload.taskKind == "artifact":
+        artifact = db.get(Artifact, task_id)
+        if not artifact:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        try:
+            assert_project_visible(db, user, artifact.project_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        artifact.status = "生成中"
+        artifact.updated_at = current_day(db)
+        db.commit()
+        result = enqueue_or_run(export_artifact_task, (artifact.id,), lambda: {"artifact": map_artifact(generate_artifact(db, artifact.id))})
+        write_audit(db, user["name"], "retry_background_task", "artifact", task_id, {})
+        db.commit()
+        return {"id": artifact.id, "taskKind": "artifact", "status": "queued", **result}
+    raise HTTPException(status_code=400, detail="Unsupported taskKind")
 
 
 @app.get("/api/bootstrap")

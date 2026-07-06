@@ -118,3 +118,50 @@ export function calculateInvestmentEstimate(projectId: string) {
 export function confirmInvestmentEstimate(estimateId: string) {
   return request<InvestmentEstimate>(`/api/estimates/${estimateId}/confirm`, { method: "POST" });
 }
+
+
+export function claimWorkItem(id: string, assigneeId?: string) {
+  return request<{ id: string; status: string; assigneeId?: string }>(`/api/work-items/${id}/claim`, {
+    method: "POST",
+    body: JSON.stringify({ assigneeId })
+  });
+}
+
+export function completeWorkItem(id: string, comment?: string) {
+  return request<{ id: string; status: string }>(`/api/work-items/${id}/complete`, {
+    method: "POST",
+    body: JSON.stringify({ comment })
+  });
+}
+
+export function approveReviewTask(id: string, comment?: string) {
+  return request<{ id: string; status: string; decision: string }>(`/api/review-tasks/${id}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ comment })
+  });
+}
+
+export function rejectReviewTask(id: string, comment?: string) {
+  return request<{ id: string; status: string; decision: string; comment?: string }>(`/api/review-tasks/${id}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ comment })
+  });
+}
+
+export function markNotificationRead(id: string) {
+  return request<{ id: string; status: string }>(`/api/notifications/${id}/read`, { method: "POST" });
+}
+
+export function cancelBackgroundTask(id: string, taskKind: "parse" | "quality" | "artifact") {
+  return request<{ id: string; taskKind: string; status: string }>(`/api/tasks/${id}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ taskKind })
+  });
+}
+
+export function retryBackgroundTask(id: string, taskKind: "parse" | "quality" | "artifact") {
+  return request<{ id: string; taskKind: string; status: string }>(`/api/tasks/${id}/retry`, {
+    method: "POST",
+    body: JSON.stringify({ taskKind })
+  });
+}
