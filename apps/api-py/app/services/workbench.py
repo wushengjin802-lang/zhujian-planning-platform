@@ -92,6 +92,37 @@ def _due_status(due_at: datetime | None, status: str) -> str:
     return "normal"
 
 
+def _due_hours_remaining(due_at: datetime | None, status: str) -> float | None:
+    if not due_at or _due_status(due_at, status) == "none":
+        return None
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=timezone.utc)
+    return round((due_at - _now()).total_seconds() / 3600, 1)
+
+
+def _sla_level(due_at: datetime | None, status: str, priority: str) -> str:
+    due_status = _due_status(due_at, status)
+    if due_status == "overdue":
+        return "critical"
+    if due_status == "due_soon" or priority == "P0":
+        return "warning"
+    if due_status == "normal":
+        return "normal"
+    return "none"
+
+
+def _sla_label(due_at: datetime | None, status: str, priority: str) -> str:
+    due_status = _due_status(due_at, status)
+    hours = _due_hours_remaining(due_at, status)
+    if due_status == "overdue" and hours is not None:
+        return f"已逾期 {abs(hours):.1f} 小时"
+    if due_status == "due_soon" and hours is not None:
+        return f"{hours:.1f} 小时内到期"
+    if due_status == "normal" and due_at:
+        return "未到期"
+    return "无SLA要求"
+
+
 def _work_item_actions(item: WorkItem, user: dict[str, Any] | None) -> dict[str, bool]:
     if not user:
         return {"canClaim": True, "canComplete": True, "canTransfer": True, "canCancel": True, "canComment": True, "canViewEvents": True}
@@ -110,6 +141,20 @@ def _work_item_actions(item: WorkItem, user: dict[str, Any] | None) -> dict[str,
     }
 
 
+def _work_item_action_reasons(item: WorkItem, user: dict[str, Any] | None) -> dict[str, str]:
+    actions = _work_item_actions(item, user)
+    reasons: dict[str, str] = {}
+    if not actions.get("canClaim"):
+        reasons["claim"] = "该工作项已分配或已关闭。"
+    if not actions.get("canComplete"):
+        reasons["complete"] = "仅负责人或管理角色可以完成该工作项。"
+    if not actions.get("canTransfer"):
+        reasons["transfer"] = "仅负责人或管理角色可以转交该工作项。"
+    if not actions.get("canCancel"):
+        reasons["cancel"] = "仅负责人或管理角色可以取消该工作项。"
+    return reasons
+
+
 def _review_task_actions(task: ReviewTask, user: dict[str, Any] | None) -> dict[str, bool]:
     if not user:
         return {"canAssign": True, "canApprove": True, "canReject": True, "canComment": True, "canCountersign": True, "canViewEvents": True}
@@ -126,6 +171,18 @@ def _review_task_actions(task: ReviewTask, user: dict[str, Any] | None) -> dict[
         "canCountersign": is_open,
         "canViewEvents": True,
     }
+
+
+def _review_task_action_reasons(task: ReviewTask, user: dict[str, Any] | None) -> dict[str, str]:
+    actions = _review_task_actions(task, user)
+    reasons: dict[str, str] = {}
+    if not actions.get("canAssign"):
+        reasons["assign"] = "仅管理角色或未分配任务的可见项目成员可以分配审核人。"
+    if not actions.get("canApprove"):
+        reasons["approve"] = "仅指定审核人或管理角色可以通过审核。"
+    if not actions.get("canReject"):
+        reasons["reject"] = "仅指定审核人或管理角色可以退回审核。"
+    return reasons
 
 
 def _find_work_item(db: Session, source_type: str, source_id: str) -> WorkItem | None:
@@ -252,6 +309,50 @@ def _upsert_notification(db: Session, *, source_type: str, source_id: str, proje
         note.route = route
         note.updated_at = _now()
 
+
+
+
+def ensure_sla_notifications(db: Session, work_items: Iterable[WorkItem], review_tasks: Iterable[ReviewTask]) -> None:
+    """Materialise only workbench-scoped SLA reminders.
+
+    This keeps v1.5 inside the workbench boundary: it does not introduce a new
+    notification product, it only makes overdue/due-soon workbench rows visible
+    as in-page reminders and records them through the existing notification table.
+    """
+    for item in work_items:
+        due_status = _due_status(item.due_at, item.status)
+        if due_status not in {"overdue", "due_soon"}:
+            continue
+        level = "danger" if due_status == "overdue" else "warning"
+        title = f"工作项{'已逾期' if due_status == 'overdue' else '即将到期'}：{item.title}"
+        _upsert_notification(
+            db,
+            source_type="work_item_sla",
+            source_id=item.id,
+            project_id=item.project_id,
+            level=level,
+            title=title,
+            message=_sla_label(item.due_at, item.status, item.priority),
+            route=item.route or "/dashboard",
+            user_id=item.assignee_id,
+        )
+    for task in review_tasks:
+        due_status = _due_status(task.due_at, task.status)
+        if due_status not in {"overdue", "due_soon"}:
+            continue
+        level = "danger" if due_status == "overdue" else "warning"
+        title = f"审核任务{'已逾期' if due_status == 'overdue' else '即将到期'}：{task.title}"
+        _upsert_notification(
+            db,
+            source_type="review_task_sla",
+            source_id=task.id,
+            project_id=task.project_id,
+            level=level,
+            title=title,
+            message=_sla_label(task.due_at, task.status, task.priority),
+            route=task.route or "/dashboard",
+            user_id=task.reviewer_id,
+        )
 
 def ensure_workbench_state(
     db: Session,
@@ -389,10 +490,14 @@ def map_work_item(item: WorkItem, project_by_id: dict[str, Project], users_by_id
         "detail": item.detail,
         "dueAt": item.due_at.isoformat() if item.due_at else None,
         "dueStatus": _due_status(item.due_at, item.status),
+        "dueHoursRemaining": _due_hours_remaining(item.due_at, item.status),
+        "slaLevel": _sla_level(item.due_at, item.status, item.priority),
+        "slaLabel": _sla_label(item.due_at, item.status, item.priority),
         "sourceType": item.source_type,
         "sourceId": item.source_id,
         "persistent": True,
         "actions": _work_item_actions(item, user),
+        "actionReasons": _work_item_action_reasons(item, user),
     }
 
 
@@ -418,8 +523,12 @@ def map_review_task(task: ReviewTask, project_by_id: dict[str, Project], users_b
         "comment": task.comment,
         "dueAt": task.due_at.isoformat() if task.due_at else None,
         "dueStatus": _due_status(task.due_at, task.status),
+        "dueHoursRemaining": _due_hours_remaining(task.due_at, task.status),
+        "slaLevel": _sla_level(task.due_at, task.status, task.priority),
+        "slaLabel": _sla_label(task.due_at, task.status, task.priority),
         "persistent": True,
         "actions": _review_task_actions(task, user),
+        "actionReasons": _review_task_action_reasons(task, user),
     }
 
 

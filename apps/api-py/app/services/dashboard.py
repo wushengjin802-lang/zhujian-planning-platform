@@ -32,6 +32,7 @@ from app.services.workbench import (
     ensure_workbench_state,
     is_management_role,
     map_notification,
+    ensure_sla_notifications,
     map_review_task,
     map_task_event,
     map_work_item,
@@ -125,6 +126,61 @@ def _record_stuck_task_events(db: Session, tasks: list[dict[str, Any]], user: di
             actor=user,
             payload={"updatedAt": task.get("updatedAt"), "taskName": task.get("name")},
         )
+
+
+
+
+def _minutes_since(value: datetime | str | None) -> int | None:
+    if not isinstance(value, datetime):
+        return None
+    now = datetime.now(value.tzinfo or timezone.utc)
+    return max(0, round((now - value).total_seconds() / 60))
+
+
+def _task_heartbeat(updated_at: datetime | str | None, stuck: bool) -> dict[str, Any]:
+    minutes = _minutes_since(updated_at)
+    if minutes is None:
+        return {"level": "unknown", "message": "无更新时间", "minutesSinceUpdate": None}
+    if stuck:
+        return {"level": "danger", "message": f"{minutes} 分钟未更新", "minutesSinceUpdate": minutes}
+    if minutes > 20:
+        return {"level": "warning", "message": f"{minutes} 分钟未更新", "minutesSinceUpdate": minutes}
+    return {"level": "normal", "message": f"{minutes} 分钟内有更新", "minutesSinceUpdate": minutes}
+
+
+def _card_health(key: str, label: str, total: int, alerts: int = 0, status: str | None = None) -> dict[str, Any]:
+    resolved_status = status or ("danger" if alerts else "normal")
+    messages = {
+        "normal": "运行正常",
+        "warning": "需要关注",
+        "danger": "存在阻断或逾期",
+        "degraded": "部分数据不可用",
+        "empty": "暂无数据",
+    }
+    if total == 0 and not alerts and not status:
+        resolved_status = "empty"
+    return {
+        "key": key,
+        "label": label,
+        "status": resolved_status,
+        "count": total,
+        "alerts": alerts,
+        "message": messages.get(resolved_status, resolved_status),
+    }
+
+
+def _sla_summary(work_items: list[dict[str, Any]], review_queue: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = work_items + review_queue
+    overdue = [item for item in rows if item.get("dueStatus") == "overdue"]
+    due_soon = [item for item in rows if item.get("dueStatus") == "due_soon"]
+    return {
+        "overdue": len(overdue),
+        "dueSoon": len(due_soon),
+        "normal": sum(1 for item in rows if item.get("dueStatus") == "normal"),
+        "total": len(rows),
+        "level": "danger" if overdue else "warning" if due_soon else "normal",
+        "message": f"{len(overdue)} 个逾期，{len(due_soon)} 个24小时内到期",
+    }
 
 
 def _iso(value: datetime | str | None) -> str | None:
@@ -221,6 +277,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
 
     work_items_rows = db.scalars(work_stmt.order_by(WorkItem.priority, WorkItem.updated_at.desc()).limit(50)).all()
     review_rows = db.scalars(review_stmt.order_by(ReviewTask.priority, ReviewTask.updated_at.desc()).limit(30)).all()
+    ensure_sla_notifications(db, work_items_rows, review_rows)
+    db.commit()
     note_rows = db.scalars(notification_stmt.order_by(Notification.created_at.desc()).limit(20)).all()
 
     work_items = [map_work_item(item, project_by_id, users_by_id, user) for item in work_items_rows]
@@ -270,6 +328,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
                 "updatedAt": _iso(updated_at),
                 "route": "/documents",
                 "stuck": _is_stuck(job.status, updated_at),
+                "heartbeat": _task_heartbeat(updated_at, _is_stuck(job.status, updated_at)),
+                "stuckMinutes": _minutes_since(updated_at) if _is_stuck(job.status, updated_at) else None,
                 "canCancel": job.status in {"queued", "pending", "running", "started"},
                 "canRetry": job.status in {"failed", "error", "cancelled", "revoked"},
             }
@@ -292,6 +352,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
                 "updatedAt": _iso(updated_at),
                 "route": "/quality",
                 "stuck": _is_stuck(job.status, updated_at),
+                "heartbeat": _task_heartbeat(updated_at, _is_stuck(job.status, updated_at)),
+                "stuckMinutes": _minutes_since(updated_at) if _is_stuck(job.status, updated_at) else None,
                 "canCancel": job.status in {"queued", "pending", "running", "started"},
                 "canRetry": job.status in {"failed", "error", "cancelled", "revoked"},
             }
@@ -314,6 +376,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
                 "updatedAt": artifact.updated_at,
                 "route": "/artifacts",
                 "stuck": False,
+                "heartbeat": _task_heartbeat(None, False),
+                "stuckMinutes": None,
                 "canCancel": artifact.status == "生成中",
                 "canRetry": artifact.status == "受阻",
             }
@@ -330,6 +394,16 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
     if stuck_tasks:
         _record_stuck_task_events(db, stuck_tasks, user)
         db.commit()
+
+    sla_summary = _sla_summary(work_items, review_queue)
+    card_health = [
+        _card_health("projects", "项目范围", len(scoped_projects)),
+        _card_health("workItems", "待办事项", len(work_items), sla_summary["overdue"]),
+        _card_health("reviewQueue", "审核队列", len(review_queue), sum(1 for item in review_queue if item.get("dueStatus") == "overdue")),
+        _card_health("tasks", "异步任务", len(tasks), len(stuck_tasks) + len(failed_tasks)),
+        _card_health("quality", "质量问题", len(unresolved_issues), len(blockers)),
+        _card_health("notifications", "提醒通知", len(note_rows)),
+    ]
 
     avg_project_progress = round(sum(project.progress for project in scoped_projects) / len(scoped_projects)) if scoped_projects else 0
     metrics = [
@@ -459,6 +533,7 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
     overdue_work = [item for item in work_items if item.get("dueStatus") == "overdue"]
     due_soon_work = [item for item in work_items if item.get("dueStatus") == "due_soon"]
     overdue_review = [item for item in review_queue if item.get("dueStatus") == "overdue"]
+    due_soon_review = [item for item in review_queue if item.get("dueStatus") == "due_soon"]
     if overdue_work or overdue_review:
         notifications.insert(
             0,
@@ -471,14 +546,14 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
                 "status": "未读",
             },
         )
-    elif due_soon_work:
+    elif due_soon_work or due_soon_review:
         notifications.insert(
             0,
             {
                 "id": "due-soon-workbench-items",
                 "level": "warning",
-                "title": f"有 {len(due_soon_work)} 个待办即将到期",
-                "message": "请在24小时内完成或转交。",
+                "title": f"有 {len(due_soon_work) + len(due_soon_review)} 个事项即将到期",
+                "message": "请在24小时内完成、转交或审核。",
                 "route": "/dashboard",
                 "status": "未读",
             },
@@ -546,6 +621,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         "reviewQueue": review_queue[:12],
         "tasks": tasks,
         "notifications": notifications[:12],
+        "slaSummary": sla_summary,
+        "cardHealth": card_health,
         "latestEvents": latest_events,
         "taskEvents": task_events,
         "recentActivities": recent_activities,
@@ -569,5 +646,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             "rowActionPermissions": True,
             "workbenchSlaHints": True,
             "stuckTaskAuditEvents": True,
+            "slaNotificationMaterialised": True,
+            "taskHeartbeat": True,
+            "cardHealth": True,
         },
     }

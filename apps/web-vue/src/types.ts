@@ -199,6 +199,25 @@ export interface DashboardProjectSummary {
 }
 
 export type DashboardDueStatus = "none" | "normal" | "due_soon" | "overdue";
+export type DashboardSlaLevel = "none" | "normal" | "warning" | "critical";
+
+export interface DashboardCardHealth {
+  key: string;
+  label: string;
+  status: "normal" | "warning" | "danger" | "degraded" | "empty" | string;
+  count: number;
+  alerts: number;
+  message: string;
+}
+
+export interface DashboardSlaSummary {
+  overdue: number;
+  dueSoon: number;
+  normal: number;
+  total: number;
+  level: "normal" | "warning" | "danger";
+  message: string;
+}
 
 export interface DashboardWorkItem {
   id: string;
@@ -215,6 +234,9 @@ export interface DashboardWorkItem {
   detail: string;
   dueAt?: string | null;
   dueStatus?: DashboardDueStatus;
+  dueHoursRemaining?: number | null;
+  slaLevel?: DashboardSlaLevel;
+  slaLabel?: string;
   sourceType?: string | null;
   sourceId?: string | null;
   persistent?: boolean;
@@ -226,6 +248,7 @@ export interface DashboardWorkItem {
     canComment?: boolean;
     canViewEvents?: boolean;
   };
+  actionReasons?: Record<string, string>;
 }
 
 export interface DashboardReviewItem {
@@ -247,6 +270,9 @@ export interface DashboardReviewItem {
   comment?: string | null;
   dueAt?: string | null;
   dueStatus?: DashboardDueStatus;
+  dueHoursRemaining?: number | null;
+  slaLevel?: DashboardSlaLevel;
+  slaLabel?: string;
   persistent?: boolean;
   actions?: {
     canAssign?: boolean;
@@ -256,6 +282,7 @@ export interface DashboardReviewItem {
     canCountersign?: boolean;
     canViewEvents?: boolean;
   };
+  actionReasons?: Record<string, string>;
 }
 
 export interface DashboardTask {
@@ -272,6 +299,8 @@ export interface DashboardTask {
   updatedAt?: string | null;
   route: string;
   stuck?: boolean;
+  stuckMinutes?: number | null;
+  heartbeat?: { level: "normal" | "warning" | "danger" | "unknown" | string; message: string; minutesSinceUpdate?: number | null };
   canCancel?: boolean;
   canRetry?: boolean;
 }
@@ -338,6 +367,8 @@ export interface DashboardPayload {
   reviewQueue: DashboardReviewItem[];
   tasks: DashboardTask[];
   notifications: DashboardNotification[];
+  slaSummary?: DashboardSlaSummary;
+  cardHealth?: DashboardCardHealth[];
   latestEvents: WorkbenchEvent[];
   taskEvents: TaskEvent[];
   recentActivities: DashboardActivity[];

@@ -179,6 +179,19 @@ function dueType(dueStatus?: string) {
   return "info";
 }
 
+function healthType(status?: string) {
+  if (status === "danger") return "danger";
+  if (status === "warning" || status === "degraded") return "warning";
+  if (status === "normal") return "success";
+  return "info";
+}
+
+function slaSummaryText() {
+  const summary = dashboard.value?.slaSummary;
+  if (!summary || !summary.total) return "暂无SLA风险";
+  return summary.message;
+}
+
 async function showWorkItemEvents(id: string, title: string) {
   eventDialogTitle.value = `工作项记录：${title}`;
   eventDialogVisible.value = true;
@@ -260,6 +273,27 @@ watch(
             <p>{{ metric.description }}</p>
           </div>
           <el-tag :type="toneType[metric.tone]" effect="light" round>{{ metric.tone === "danger" ? "需关注" : "实时" }}</el-tag>
+        </el-card>
+      </section>
+
+      <section class="dashboard-health-row">
+        <el-card class="dashboard-panel health-card" shadow="never">
+          <template #header>
+            <div class="dashboard-panel-title">
+              <div>
+                <h3>工作台健康状态</h3>
+                <p>{{ slaSummaryText() }}</p>
+              </div>
+              <el-tag :type="dashboard.slaSummary?.level === 'danger' ? 'danger' : dashboard.slaSummary?.level === 'warning' ? 'warning' : 'success'">SLA</el-tag>
+            </div>
+          </template>
+          <div class="health-grid">
+            <div v-for="card in dashboard.cardHealth ?? []" :key="card.key" class="health-item">
+              <el-tag :type="healthType(card.status)" effect="plain" size="small">{{ card.label }}</el-tag>
+              <strong>{{ card.count }}</strong>
+              <span>{{ card.message }}<em v-if="card.alerts"> · {{ card.alerts }} 项需关注</em></span>
+            </div>
+          </div>
         </el-card>
       </section>
 
@@ -368,7 +402,7 @@ watch(
               <span class="work-main">
                 <strong>{{ item.title }}</strong>
                 <small>{{ item.projectName }} · {{ item.category }} · {{ item.detail }}</small>
-                <el-tag v-if="dueLabel(item.dueStatus, item.dueAt)" :type="dueType(item.dueStatus)" effect="plain" size="small">{{ dueLabel(item.dueStatus, item.dueAt) }}</el-tag>
+                <el-tag v-if="dueLabel(item.dueStatus, item.dueAt)" :type="dueType(item.dueStatus)" effect="plain" size="small">{{ item.slaLabel || dueLabel(item.dueStatus, item.dueAt) }}</el-tag>
               </span>
               <span class="work-owner">{{ item.assigneeName || item.owner }}</span>
               <el-tag :type="statusType(item.status)" effect="plain" size="small">{{ item.status }}</el-tag>
@@ -397,7 +431,7 @@ watch(
               <span class="work-main">
                 <strong>{{ item.title }}</strong>
                 <small>{{ item.projectName }} · {{ item.type }} · {{ item.description }}</small>
-                <el-tag v-if="dueLabel(item.dueStatus, item.dueAt)" :type="dueType(item.dueStatus)" effect="plain" size="small">{{ dueLabel(item.dueStatus, item.dueAt) }}</el-tag>
+                <el-tag v-if="dueLabel(item.dueStatus, item.dueAt)" :type="dueType(item.dueStatus)" effect="plain" size="small">{{ item.slaLabel || dueLabel(item.dueStatus, item.dueAt) }}</el-tag>
               </span>
               <span class="work-owner">{{ item.reviewerName || item.submitter }}</span>
               <el-tag type="warning" effect="plain" size="small">{{ item.status }}</el-tag>
@@ -473,7 +507,7 @@ watch(
               <template #default="{ row }">
                 <div class="task-name">
                   <strong>{{ row.name }}</strong>
-                  <span>{{ row.type }} · {{ row.projectName }}</span>
+                  <span>{{ row.type }} · {{ row.projectName }} · {{ row.heartbeat?.message || row.message }}</span>
                 </div>
               </template>
             </el-table-column>
@@ -484,7 +518,7 @@ watch(
             </el-table-column>
             <el-table-column label="状态" width="90">
               <template #default="{ row }">
-                <el-tag :type="row.stuck ? 'danger' : statusType(row.status)" size="small">{{ row.stuck ? '疑似卡住' : row.status }}</el-tag>
+                <el-tag :type="row.stuck ? 'danger' : statusType(row.status)" size="small">{{ row.stuck ? `疑似卡住${row.stuckMinutes ? ' ' + row.stuckMinutes + '分钟' : ''}` : row.status }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="更新时间" width="120">
@@ -1083,4 +1117,40 @@ watch(
   margin: 4px 0 0;
   color: #64748b;
 }
+
+.dashboard-health-row {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.health-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(23, 63, 91, 0.1);
+  border-radius: 12px;
+  background: #f8fbfd;
+}
+
+.health-item strong {
+  color: #173f5b;
+  font-size: 22px;
+}
+
+.health-item span {
+  color: #617386;
+  font-size: 12px;
+}
+
+.health-item em {
+  color: #b65d0b;
+  font-style: normal;
+}
+
 </style>
