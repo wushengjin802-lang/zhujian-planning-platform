@@ -83,18 +83,6 @@ const userOptions = computed(() => center.value?.users ?? []);
 const regionRuleOptions = computed(() => center.value?.regionRules ?? []);
 const draftOptions = computed(() => center.value?.wizardDrafts ?? []);
 
-const projectStageSteps = [
-  { no: 1, title: "项目建档", subtitle: "范围与权限" },
-  { no: 2, title: "资料清点", subtitle: "版本与完整性" },
-  { no: 3, title: "事实确认", subtitle: "统一数据底板" },
-  { no: 4, title: "章节编制", subtitle: "初稿与引用" },
-  { no: 5, title: "分析测算", subtitle: "GIS与投资" },
-  { no: 6, title: "专业复核", subtitle: "会签与门禁" },
-  { no: 7, title: "成果输出", subtitle: "发布与归档" }
-];
-
-const activeStageNo = computed(() => 1);
-
 const overviewMetricMeta: Record<string, { icon: string; color: string; order: number }> = {
   total: { icon: "项", color: "#20a681", order: 1 },
   active: { icon: "进", color: "#4a90ff", order: 2 },
@@ -426,16 +414,6 @@ onMounted(() => reload());
   </div>
 
   <div v-loading="loading">
-    <el-card class="project-stage-card" shadow="never">
-      <div class="project-stage-flow">
-        <div v-for="step in projectStageSteps" :key="step.no" class="project-stage-item" :class="{ active: step.no === activeStageNo, passed: step.no < activeStageNo }">
-          <div class="stage-index">{{ step.no }}</div>
-          <div class="stage-title">{{ step.title }}</div>
-          <div class="stage-subtitle">{{ step.subtitle }}</div>
-        </div>
-      </div>
-    </el-card>
-
     <el-card class="overview-panel compact-overview" shadow="never">
       <div class="overview-title">项目概览 <span>（所有项目）</span></div>
       <div class="overview-metric-row">
@@ -775,85 +753,6 @@ onMounted(() => reload());
 </template>
 
 <style scoped>
-.project-stage-card {
-  margin-bottom: 10px;
-  border: 1px solid #e1e8ef;
-  border-radius: 4px;
-}
-
-.project-stage-card :deep(.el-card__body) {
-  padding: 14px 18px 12px;
-}
-
-.project-stage-flow {
-  position: relative;
-  display: grid;
-  grid-template-columns: repeat(7, minmax(86px, 1fr));
-  align-items: start;
-  gap: 4px;
-}
-
-.project-stage-flow::before {
-  content: "";
-  position: absolute;
-  top: 13px;
-  left: 3.5%;
-  right: 3.5%;
-  height: 2px;
-  background: #d8e0e8;
-}
-
-.project-stage-item {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  justify-items: center;
-  min-width: 0;
-  color: #4d6276;
-  text-align: center;
-}
-
-.stage-index {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  margin-bottom: 8px;
-  place-items: center;
-  border: 2px solid #cdd7e2;
-  border-radius: 50%;
-  background: #ffffff;
-  color: #8293a4;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.project-stage-item.active .stage-index,
-.project-stage-item.passed .stage-index {
-  border-color: #20a681;
-  background: #20a681;
-  color: #ffffff;
-  box-shadow: 0 3px 10px rgba(32, 166, 129, 0.22);
-}
-
-.stage-title {
-  color: #223548;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.3;
-}
-
-.project-stage-item.active .stage-title {
-  color: #118363;
-}
-
-.stage-subtitle {
-  margin-top: 5px;
-  color: #7d8b98;
-  font-size: 12px;
-  line-height: 1.2;
-  white-space: nowrap;
-}
-
 .overview-panel {
   margin-bottom: 12px;
   border: 1px solid #dfe8f0;
@@ -923,12 +822,6 @@ onMounted(() => reload());
 @media (max-width: 1180px) {
   .overview-metric-row {
     grid-template-columns: repeat(3, minmax(150px, 1fr));
-  }
-
-  .project-stage-flow {
-    overflow-x: auto;
-    grid-template-columns: repeat(7, 120px);
-    padding-bottom: 4px;
   }
 }
 </style>

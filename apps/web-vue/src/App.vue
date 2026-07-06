@@ -19,6 +19,7 @@ import {
 } from "@element-plus/icons-vue";
 import loginBackground from "./assets/login-bg.png";
 import { usePlatformStore } from "./stores/platform";
+import PhaseProgress from "./components/PhaseProgress.vue";
 
 const store = usePlatformStore();
 const route = useRoute();
@@ -41,6 +42,16 @@ const routeIcon: Record<string, unknown> = {
 };
 
 const meta = computed(() => store.data.routeMeta[String(route.name ?? "dashboard")] ?? ["工作台", ""]);
+
+const workflowActiveNo = computed(() => {
+  const routeName = String(route.name ?? "");
+  const routeStep = store.data.workflow.find((step) => step.route === routeName);
+  if (routeStep) return routeStep.no;
+
+  const projectPhase = store.currentProject?.phase ?? "";
+  const phaseStep = store.data.workflow.find((step) => projectPhase === step.name || projectPhase.includes(step.name) || step.name.includes(projectPhase));
+  return phaseStep?.no ?? 1;
+});
 
 onMounted(async () => {
   await store.bootstrap();
@@ -129,13 +140,7 @@ async function confirmLogout() {
         </div>
       </el-header>
 
-      <section class="workflow-strip">
-        <router-link v-for="step in store.data.workflow" :key="step.no" :to="`/${step.route}`">
-          <span>{{ step.no }}</span>
-          <strong>{{ step.name }}</strong>
-          <small>{{ step.sub }}</small>
-        </router-link>
-      </section>
+      <PhaseProgress v-if="store.data.workflow.length" :steps="store.data.workflow" :active-no="workflowActiveNo" />
 
       <div class="status-line" v-loading="store.loading">{{ store.notice }}</div>
 
