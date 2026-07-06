@@ -6,7 +6,12 @@ import {
   addProjectMember,
   addProjectMilestone,
   changeProjectStatus,
+  createProjectMigrationPlan,
+  createProjectRevision,
+  closeProjectRevision,
   initializeProjectPackage,
+  loadProjectMigrationPreview,
+  applyProjectMigrationPlan,
   copyProject,
   createProject,
   loadProjectCenter,
@@ -34,6 +39,8 @@ const filters = reactive({ keyword: "", status: "", risk: "" });
 const memberForm = reactive({ userId: "", role: "项目成员" });
 const milestoneForm = reactive({ name: "", owner: "项目负责人", status: "未开始", dueAt: "" });
 const copyForm = reactive({ open: false, name: "", copyMembers: true, copyMilestones: true, copySettings: true });
+const migrationForm = reactive({ templateId: "", templateVersion: "", regionRuleId: "" });
+const revisionForm = reactive({ title: "", reason: "" });
 const materialStatuses = ["待上传", "已上传", "已确认", "不适用"];
 const form = reactive<ProjectCreateInput & { open: boolean }>({
   open: false,
@@ -123,6 +130,7 @@ async function reload(selectId?: string) {
 
 async function selectProject(projectId: string, openDrawer = true) {
   profile.value = await loadProjectProfile(projectId);
+  syncMigrationFormFromProfile();
   store.currentProjectId = projectId;
   if (openDrawer) drawerOpen.value = true;
 }
@@ -220,6 +228,51 @@ async function saveProfile() {
   await store.refresh();
   await reload(profile.value.id);
   ElMessage.success("项目信息已保存");
+}
+
+function syncMigrationFormFromProfile() {
+  if (!profile.value) return;
+  migrationForm.templateId = profile.value.templateId || "";
+  migrationForm.templateVersion = profile.value.templateVersion || "";
+  migrationForm.regionRuleId = profile.value.regionRuleId || "";
+}
+
+async function previewMigration() {
+  if (!profile.value) return;
+  const preview = await loadProjectMigrationPreview(profile.value.id, { ...migrationForm });
+  profile.value.migrationPreview = preview;
+  ElMessage({ type: preview.impactCount ? "warning" : "success", message: `迁移影响项：${preview.impactCount}，风险：${preview.riskLevel}` });
+}
+
+async function createMigrationPlan() {
+  if (!profile.value) return;
+  await createProjectMigrationPlan(profile.value.id, { ...migrationForm });
+  await reload(profile.value.id);
+  ElMessage.success("迁移计划已生成");
+}
+
+async function applyMigrationPlan(planId: string) {
+  if (!profile.value) return;
+  await ElMessageBox.confirm("应用迁移计划会更新项目模板/地区规则并补齐初始化包，不会删除现有资料、事实、章节和成果项。确认应用？", "应用迁移计划", { type: "warning" });
+  await applyProjectMigrationPlan(profile.value.id, planId);
+  await reload(profile.value.id);
+  ElMessage.success("迁移计划已应用");
+}
+
+async function createRevision() {
+  if (!profile.value) return;
+  await createProjectRevision(profile.value.id, { title: revisionForm.title || `${profile.value.name} 修订`, reason: revisionForm.reason });
+  revisionForm.title = "";
+  revisionForm.reason = "";
+  await reload(profile.value.id);
+  ElMessage.success("项目修订已创建");
+}
+
+async function closeRevision(revisionId: string) {
+  if (!profile.value) return;
+  await closeProjectRevision(profile.value.id, revisionId, "已确认");
+  await reload(profile.value.id);
+  ElMessage.success("项目修订已确认关闭");
 }
 
 async function addMemberToProfile() {
@@ -511,6 +564,64 @@ onMounted(() => reload());
             <el-table-column prop="createdAt" label="创建时间" min-width="200" />
           </el-table>
         </el-tab-pane>
+
+        <el-tab-pane label="迁移与修订" name="migration">
+          <div class="toolbar">
+            <div>
+              <strong>模板/地区规则迁移差异</strong>
+              <p style="margin: 4px 0 0; color: #6b7c88">只分析项目中心初始化骨架差异，不自动删除现有资料、事实、章节或成果项。</p>
+            </div>
+            <div class="topbar-actions">
+              <el-button @click="syncMigrationFormFromProfile">使用当前配置</el-button>
+              <el-button type="primary" :disabled="!profile.actions?.canCreateMigrationPlan" @click="previewMigration">预览差异</el-button>
+              <el-button :disabled="!profile.actions?.canCreateMigrationPlan" @click="createMigrationPlan">生成迁移计划</el-button>
+            </div>
+          </div>
+          <el-row :gutter="14" style="margin-bottom: 14px">
+            <el-col :span="8"><el-form-item label="目标模板"><el-select v-model="migrationForm.templateId" clearable><el-option v-for="tpl in templateOptions" :key="tpl.id" :label="`${tpl.name} ${tpl.version}`" :value="tpl.id" /></el-select></el-form-item></el-col>
+            <el-col :span="8"><el-form-item label="目标模板版本"><el-input v-model="migrationForm.templateVersion" /></el-form-item></el-col>
+            <el-col :span="8"><el-form-item label="目标地区规则"><el-select v-model="migrationForm.regionRuleId" filterable clearable><el-option v-for="rule in regionRuleOptions" :key="rule.id" :label="`${rule.name}｜${rule.region}｜${rule.version}`" :value="rule.id" /></el-select></el-form-item></el-col>
+          </el-row>
+
+          <el-alert v-if="profile.migrationPreview" :type="profile.migrationPreview.impactCount ? 'warning' : 'success'" show-icon :closable="false" style="margin-bottom: 12px">
+            <template #title>影响项 {{ profile.migrationPreview.impactCount }} 个，风险 {{ profile.migrationPreview.riskLevel }}：{{ profile.migrationPreview.recommendations.join('；') }}</template>
+          </el-alert>
+          <el-row v-if="profile.migrationPreview" :gutter="12" style="margin-bottom: 12px">
+            <el-col v-for="(section, key) in profile.migrationPreview.sections" :key="key" :span="6">
+              <el-card shadow="never" class="metric-card">
+                <span>{{ section.label }}</span>
+                <strong>{{ section.impactCount }}</strong>
+                <small>新增 {{ section.added.length }} / 移除 {{ section.removed.length }} / 变化 {{ section.changed.length }}</small>
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <el-divider content-position="left">迁移计划</el-divider>
+          <el-table :data="profile.migrationPlans ?? []" border empty-text="暂无迁移计划">
+            <el-table-column prop="id" label="计划ID" width="190" />
+            <el-table-column prop="status" label="状态" width="100" />
+            <el-table-column prop="riskLevel" label="风险" width="100" />
+            <el-table-column label="目标规则" min-width="220"><template #default="scope">{{ scope.row.toRegionRuleId }} / {{ scope.row.toRuleVersion }}</template></el-table-column>
+            <el-table-column prop="createdBy" label="创建人" width="120" />
+            <el-table-column label="操作" width="120"><template #default="scope"><el-button link type="primary" :disabled="scope.row.status === '已应用' || !profile.actions?.canApplyMigrationPlan" @click="applyMigrationPlan(scope.row.id)">应用</el-button></template></el-table-column>
+          </el-table>
+
+          <el-divider content-position="left">项目修订链</el-divider>
+          <el-row :gutter="14" style="margin-bottom: 12px">
+            <el-col :span="8"><el-input v-model="revisionForm.title" placeholder="修订标题" /></el-col>
+            <el-col :span="12"><el-input v-model="revisionForm.reason" placeholder="修订原因" /></el-col>
+            <el-col :span="4"><el-button type="primary" :disabled="!profile.actions?.canCreateRevision" @click="createRevision">创建修订</el-button></el-col>
+          </el-row>
+          <el-table :data="profile.revisions ?? []" border empty-text="暂无项目修订">
+            <el-table-column prop="revisionNo" label="修订号" width="100" />
+            <el-table-column prop="title" label="标题" min-width="180" />
+            <el-table-column prop="reason" label="原因" min-width="220" />
+            <el-table-column prop="status" label="状态" width="100" />
+            <el-table-column prop="createdBy" label="创建人" width="120" />
+            <el-table-column label="操作" width="120"><template #default="scope"><el-button link type="primary" :disabled="scope.row.status !== '草稿' || !profile.actions?.canCloseRevision" @click="closeRevision(scope.row.id)">确认关闭</el-button></template></el-table-column>
+          </el-table>
+        </el-tab-pane>
+
       </el-tabs>
     </template>
   </el-drawer>

@@ -1,4 +1,4 @@
-import type { AppUser, Artifact, BootstrapPayload, DashboardNotification, DashboardPayload, FactItem, InvestmentEstimate, NotificationSubscription, PlatformStatus, Project, ProjectCenterPayload, ProjectCreateInput, ProjectDocument, ProjectRegionRule, ProjectWizardDraft, ProjectProfile, ProjectStatusGate, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
+import type { AppUser, Artifact, BootstrapPayload, DashboardNotification, DashboardPayload, FactItem, InvestmentEstimate, NotificationSubscription, PlatformStatus, Project, ProjectCenterPayload, ProjectCreateInput, ProjectDocument, ProjectRegionRule, ProjectWizardDraft, ProjectMigrationPreview, ProjectProfile, ProjectRevision, ProjectRuleMigrationPlan, ProjectStatusGate, QualityIssue, ReportChapter, TaskEvent, WorkbenchEvent } from "../types";
 
 const tokenKey = "zhujian.sessionToken";
 
@@ -120,6 +120,32 @@ export function loadProjectStatusGate(projectId: string, targetStatus: string) {
 
 export function copyProject(projectId: string, input: { name?: string; copyMembers?: boolean; copyMilestones?: boolean; copySettings?: boolean }) {
   return request<ProjectProfile>(`/api/projects/${projectId}/copy`, { method: "POST", body: JSON.stringify(input) });
+}
+
+
+export function loadProjectMigrationPreview(projectId: string, input: { templateId?: string; templateVersion?: string; regionRuleId?: string }) {
+  const params = new URLSearchParams();
+  if (input.templateId) params.set("templateId", input.templateId);
+  if (input.templateVersion) params.set("templateVersion", input.templateVersion);
+  if (input.regionRuleId) params.set("regionRuleId", input.regionRuleId);
+  const query = params.toString();
+  return request<ProjectMigrationPreview>(`/api/projects/${projectId}/migration-preview${query ? `?${query}` : ""}`);
+}
+
+export function createProjectMigrationPlan(projectId: string, input: { templateId?: string; templateVersion?: string; regionRuleId?: string }) {
+  return request<ProjectRuleMigrationPlan>(`/api/projects/${projectId}/migration-plans`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function applyProjectMigrationPlan(projectId: string, planId: string) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/migration-plans/${planId}/apply`, { method: "POST" });
+}
+
+export function createProjectRevision(projectId: string, input: { title?: string; reason?: string }) {
+  return request<ProjectRevision>(`/api/projects/${projectId}/revisions`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function closeProjectRevision(projectId: string, revisionId: string, status = "已确认") {
+  return request<ProjectRevision>(`/api/projects/${projectId}/revisions/${revisionId}/close`, { method: "POST", body: JSON.stringify({ status }) });
 }
 
 export function createDocument(projectId: string, input: { name: string; category?: string; version?: string; source?: string }) {

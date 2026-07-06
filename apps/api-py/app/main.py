@@ -26,6 +26,8 @@ from app.db.models import (
     ProjectDocument,
     ProjectInitializationRecord,
     ProjectRegionRule,
+    ProjectRuleMigrationPlan,
+    ProjectRevision,
     ProjectWizardDraft,
     ProjectMaterialRequirement,
     ProjectMilestone,
@@ -47,7 +49,7 @@ from app.services.artifacts import generate_artifact
 from app.services.auth import authenticate_user, get_session_user, logout_session
 from app.services.capabilities import platform_status
 from app.services.dashboard import build_dashboard
-from app.services.project_center import add_default_milestones, apply_project_defaults, build_project_center, can_change_status, ensure_project_initialization_package, ensure_project_member, evaluate_project_status_gate, generate_project_code, list_project_drafts, list_region_rules, map_milestone, map_material_requirement, map_project_draft, map_project_profile, map_project_summary, map_region_rule, upsert_project_draft
+from app.services.project_center import add_default_milestones, apply_project_defaults, apply_rule_migration_plan, build_project_center, can_change_status, close_project_revision, create_project_revision, create_rule_migration_plan, ensure_project_initialization_package, ensure_project_member, evaluate_project_status_gate, generate_project_code, list_project_drafts, list_region_rules, map_milestone, map_material_requirement, map_project_draft, map_project_profile, map_project_revision, map_project_summary, map_region_rule, map_rule_migration_plan, preview_project_rule_migration, upsert_project_draft
 from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, assert_review_approval_gate, is_management_role, map_task_event, map_workbench_event
 from app.services.documents import parse_document
 from app.services.estimates import calculate_estimate, confirm_estimate, get_estimate, map_estimate
@@ -58,7 +60,7 @@ from app.services.rag import generate_chapter_with_rag
 from app.services.storage import persist_upload, storage
 from app.worker.tasks import export_artifact_task, parse_document_task, quality_check_task
 
-app = FastAPI(title="住建项目策划平台 API", version="2.2.0")
+app = FastAPI(title="住建项目策划平台 API", version="2.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -164,6 +166,21 @@ class ProjectRegionRuleInput(BaseModel):
     chapters: list[dict] = []
     artifacts: list[dict] = []
     settings: dict = {}
+
+
+class ProjectMigrationPlanInput(BaseModel):
+    templateId: str | None = None
+    templateVersion: str | None = None
+    regionRuleId: str | None = None
+
+
+class ProjectRevisionInput(BaseModel):
+    title: str | None = None
+    reason: str | None = None
+
+
+class ProjectRevisionCloseInput(BaseModel):
+    status: str = "已确认"
 
 
 class DocumentCreate(BaseModel):
@@ -1212,6 +1229,97 @@ def update_project_material(project_id: str, material_id: str, payload: ProjectM
     write_audit(db, user["name"], "update_project_material", "project_material", material_id, payload.model_dump())
     db.commit()
     return map_project_profile(db, project, user)
+
+
+
+
+@app.get("/api/projects/{project_id}/migration-preview")
+def get_project_migration_preview(
+    project_id: str,
+    templateId: str | None = None,
+    templateVersion: str | None = None,
+    regionRuleId: str | None = None,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return preview_project_rule_migration(db, project, templateId, templateVersion, regionRuleId)
+
+
+@app.post("/api/projects/{project_id}/migration-plans", status_code=201)
+def create_project_migration_plan(project_id: str, payload: ProjectMigrationPlanInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可生成迁移计划")
+    row = create_rule_migration_plan(db, project, user, payload.templateId, payload.templateVersion, payload.regionRuleId)
+    write_audit(db, user["name"], "create_project_migration_plan", "project_rule_migration_plan", row.id, payload.model_dump())
+    db.commit()
+    return map_rule_migration_plan(row)
+
+
+@app.post("/api/projects/{project_id}/migration-plans/{plan_id}/apply")
+def apply_project_migration_plan(project_id: str, plan_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    plan = db.get(ProjectRuleMigrationPlan, plan_id)
+    if not project or not plan or plan.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Migration plan not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可应用迁移计划")
+    apply_rule_migration_plan(db, project, plan, user)
+    write_audit(db, user["name"], "apply_project_migration_plan", "project_rule_migration_plan", plan.id, {"projectId": project_id})
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
+@app.post("/api/projects/{project_id}/revisions", status_code=201)
+def create_project_revision_endpoint(project_id: str, payload: ProjectRevisionInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可创建项目修订")
+    row = create_project_revision(db, project, user, payload.title, payload.reason)
+    write_audit(db, user["name"], "create_project_revision", "project_revision", row.id, payload.model_dump())
+    db.commit()
+    return map_project_revision(row)
+
+
+@app.post("/api/projects/{project_id}/revisions/{revision_id}/close")
+def close_project_revision_endpoint(project_id: str, revision_id: str, payload: ProjectRevisionCloseInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    revision = db.get(ProjectRevision, revision_id)
+    if not project or not revision or revision.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Project revision not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可关闭项目修订")
+    close_project_revision(db, revision, user, payload.status)
+    write_audit(db, user["name"], "close_project_revision", "project_revision", revision.id, payload.model_dump())
+    db.commit()
+    return map_project_revision(revision)
 
 
 @app.get("/api/projects/{project_id}/status-gate")

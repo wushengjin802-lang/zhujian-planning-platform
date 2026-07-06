@@ -14,13 +14,15 @@ from app.db.models import (
     ProjectMember,
     ProjectMilestone,
     ProjectRegionRule,
+    ProjectRuleMigrationPlan,
+    ProjectRevision,
     ProjectWizardDraft,
     QualityCheckJob,
     QualityIssue,
     ReportChapter,
     ReportTemplate,
 )
-from app.services.project_center import add_default_milestones, build_project_center, evaluate_project_status_gate, ensure_project_initialization_package, map_project_profile
+from app.services.project_center import add_default_milestones, apply_rule_migration_plan, build_project_center, create_project_revision, create_rule_migration_plan, evaluate_project_status_gate, ensure_project_initialization_package, map_project_profile, preview_project_rule_migration
 
 
 class ScalarRows:
@@ -141,7 +143,7 @@ class ProjectCenterTest(unittest.TestCase):
         project.archived_at = None
         db = FakeSession({Project: [project], ProjectMember: [], ProjectMilestone: [], ProjectMaterialRequirement: [], ProjectInitializationRecord: [], FactItem: [], ReportChapter: [], Artifact: []})
         summary = ensure_project_initialization_package(db, project, {"id": "U1", "name": "张工", "role": "项目负责人"})
-        self.assertEqual(summary["packageVersion"], "v2.2")
+        self.assertEqual(summary["packageVersion"], "v2.3")
         self.assertGreaterEqual(len(db.rows_by_model[ProjectMaterialRequirement]), 5)
         self.assertGreaterEqual(len(db.rows_by_model[FactItem]), 5)
         self.assertGreaterEqual(len(db.rows_by_model[ReportChapter]), 6)
@@ -203,6 +205,62 @@ class ProjectCenterTest(unittest.TestCase):
         self.assertGreaterEqual(len(result["regionRules"]), 1)
         self.assertEqual(result["wizardDrafts"][0]["id"], "PWD-1")
         self.assertTrue(result["capabilities"]["wizardDraft"])
+
+    def test_migration_preview_and_plan_detect_rule_differences(self):
+        now = datetime.now(timezone.utc)
+        project = Project(id="P006", name="迁移项目", type="可研", location="南京", phase="项目建档", owner="张工", progress=20, risk="一般")
+        project.code = "ZJ-2026-0006"
+        project.status = "进行中"
+        project.confidentiality = "内部"
+        project.template_id = "TPL-OLD"
+        project.template_version = "v1.0"
+        project.region = "全国"
+        project.region_rule_id = "BUILTIN-COMMON"
+        project.initialization_rule_version = "v2.2"
+        project.draft_source_id = None
+        project.planned_start = None
+        project.planned_end = None
+        project.description = None
+        project.archived_at = None
+        project.created_at = now
+        project.updated_at = now
+        material = ProjectMaterialRequirement(id="PMR-6", project_id="P006", category="立项资料", name="项目立项批复或任务来源说明", required=True, status="待上传", source_type=None, source_id=None, sort_order=1)
+        db = FakeSession({Project: [project], ProjectMaterialRequirement: [material], ProjectRegionRule: [], ProjectRuleMigrationPlan: [], ProjectMember: [], ProjectMilestone: [], ProjectInitializationRecord: [], FactItem: [], ReportChapter: [], Artifact: []})
+        preview = preview_project_rule_migration(db, project, "TPL-NEW", "v2.0", "BUILTIN-GOV-INVESTMENT")
+        self.assertTrue(preview["templateChanged"])
+        self.assertTrue(preview["ruleChanged"])
+        self.assertGreater(preview["impactCount"], 0)
+        plan = create_rule_migration_plan(db, project, {"id": "U1", "name": "张工"}, "TPL-NEW", "v2.0", "BUILTIN-GOV-INVESTMENT")
+        self.assertEqual(plan.status, "待应用")
+        apply_rule_migration_plan(db, project, plan, {"id": "U1", "name": "张工"})
+        self.assertEqual(plan.status, "已应用")
+        self.assertEqual(project.template_id, "TPL-NEW")
+        self.assertEqual(project.region_rule_id, "BUILTIN-GOV-INVESTMENT")
+
+    def test_project_revision_chain_creates_single_draft_revision(self):
+        now = datetime.now(timezone.utc)
+        project = Project(id="P007", name="修订项目", type="可研", location="南京", phase="项目关闭", owner="张工", progress=95, risk="一般")
+        project.code = "ZJ-2026-0007"
+        project.status = "已关闭"
+        project.confidentiality = "内部"
+        project.template_id = "TPL-001"
+        project.template_version = "v1.0"
+        project.region = "全国"
+        project.region_rule_id = "BUILTIN-COMMON"
+        project.initialization_rule_version = "v2.3"
+        project.draft_source_id = None
+        project.planned_start = None
+        project.planned_end = None
+        project.description = None
+        project.archived_at = None
+        project.created_at = now
+        project.updated_at = now
+        db = FakeSession({Project: [project], ProjectRevision: [], ProjectMember: [], ProjectMilestone: [], ProjectMaterialRequirement: [], ProjectInitializationRecord: [], FactItem: [], ReportChapter: [], Artifact: [], QualityIssue: [], ProjectDocument: [], QualityCheckJob: []})
+        rev1 = create_project_revision(db, project, {"id": "U1", "name": "张工"}, "第一次修订", "范围调整")
+        rev2 = create_project_revision(db, project, {"id": "U1", "name": "张工"}, "重复创建", "应复用草稿")
+        self.assertEqual(rev1.id, rev2.id)
+        self.assertEqual(rev1.revision_no, "R001")
+        self.assertIn("project", rev1.baseline_snapshot)
 
 
 if __name__ == "__main__":

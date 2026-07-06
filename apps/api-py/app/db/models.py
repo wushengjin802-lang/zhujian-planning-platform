@@ -113,6 +113,49 @@ class ProjectInitializationRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 
+
+
+class ProjectRuleMigrationPlan(Base):
+    __tablename__ = "project_rule_migration_plans"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    from_template_id: Mapped[str | None] = mapped_column(Text)
+    from_template_version: Mapped[str | None] = mapped_column(Text)
+    from_region_rule_id: Mapped[str | None] = mapped_column(Text)
+    from_rule_version: Mapped[str | None] = mapped_column(Text)
+    to_template_id: Mapped[str | None] = mapped_column(Text)
+    to_template_version: Mapped[str | None] = mapped_column(Text)
+    to_region_rule_id: Mapped[str | None] = mapped_column(Text)
+    to_rule_version: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'待应用'"))
+    risk_level: Mapped[str] = mapped_column(Text, server_default=text("'一般'"))
+    diff: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_by: Mapped[str | None] = mapped_column(Text)
+    applied_by: Mapped[str | None] = mapped_column(Text)
+    applied_at: Mapped[datetime | None]
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class ProjectRevision(Base):
+    __tablename__ = "project_revisions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    parent_revision_id: Mapped[str | None] = mapped_column(Text)
+    revision_no: Mapped[str] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'草稿'"))
+    baseline_snapshot: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_by: Mapped[str | None] = mapped_column(Text)
+    closed_by: Mapped[str | None] = mapped_column(Text)
+    closed_at: Mapped[datetime | None]
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
 class ProjectDocument(Base):
     __tablename__ = "project_documents"
 

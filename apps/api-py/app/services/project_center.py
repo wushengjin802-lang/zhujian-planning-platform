@@ -14,6 +14,8 @@ from app.db.models import (
     Project,
     ProjectDocument,
     ProjectRegionRule,
+    ProjectRuleMigrationPlan,
+    ProjectRevision,
     ProjectWizardDraft,
     ProjectInitializationRecord,
     ProjectMaterialRequirement,
@@ -28,7 +30,7 @@ from app.services.workbench import is_management_role, visible_project_ids
 
 PROJECT_STATUSES = ["建档中", "进行中", "已关闭", "已归档"]
 CONFIDENTIALITY_LEVELS = ["公开", "内部", "秘密", "机密"]
-INITIALIZATION_PACKAGE_VERSION = "v2.2"
+INITIALIZATION_PACKAGE_VERSION = "v2.3"
 DEFAULT_MILESTONES = [
     ("资料清点", "资料负责人", 1),
     ("事实确认", "咨询负责人", 2),
@@ -72,7 +74,7 @@ BUILTIN_REGION_RULES: list[dict[str, Any]] = [
         "name": "通用项目初始化规则",
         "region": "全国",
         "projectType": "通用",
-        "version": "v2.2",
+        "version": "v2.3",
         "status": "已发布",
         "description": "适用于未配置地区规则的项目，采用PDD一期通用资料、事实、章节和成果骨架。",
         "materials": [
@@ -94,7 +96,7 @@ BUILTIN_REGION_RULES: list[dict[str, Any]] = [
         "name": "政府投资项目规则",
         "region": "全国",
         "projectType": "政府投资",
-        "version": "v2.2",
+        "version": "v2.3",
         "status": "已发布",
         "description": "面向政府投资类项目，额外关注财政资金、立项依据、绩效目标和用地合规。",
         "materials": [
@@ -292,6 +294,261 @@ def map_region_rule(row: ProjectRegionRule | dict[str, Any]) -> dict[str, Any]:
         "settings": row.settings or {},
         "builtin": False,
     }
+
+
+
+
+def _rule_key(item: dict[str, Any], fallback: str) -> str:
+    return str(item.get("id") or item.get("key") or item.get("name") or item.get("title") or item.get("no") or fallback)
+
+
+def _rule_label(item: dict[str, Any]) -> str:
+    return str(item.get("name") or item.get("title") or item.get("label") or item.get("no") or "未命名项")
+
+
+def _diff_rule_items(current_items: list[dict[str, Any]], target_items: list[dict[str, Any]], label: str) -> dict[str, Any]:
+    current_map = {_rule_key(item, f"current-{index}"): item for index, item in enumerate(current_items, start=1)}
+    target_map = {_rule_key(item, f"target-{index}"): item for index, item in enumerate(target_items, start=1)}
+    current_keys = set(current_map)
+    target_keys = set(target_map)
+    added = [{"key": key, "label": _rule_label(target_map[key]), "item": target_map[key]} for key in sorted(target_keys - current_keys)]
+    removed = [{"key": key, "label": _rule_label(current_map[key]), "item": current_map[key]} for key in sorted(current_keys - target_keys)]
+    changed: list[dict[str, Any]] = []
+    for key in sorted(current_keys & target_keys):
+        before = current_map[key]
+        after = target_map[key]
+        if before != after:
+            changed.append({"key": key, "label": _rule_label(after), "before": before, "after": after})
+    return {"label": label, "added": added, "removed": removed, "changed": changed, "impactCount": len(added) + len(removed) + len(changed)}
+
+
+def _project_current_blueprint(db: Session, project: Project) -> dict[str, Any]:
+    materials = [
+        {"name": row.name, "category": row.category, "required": bool(row.required), "sortOrder": row.sort_order}
+        for row in sorted(_filter_project_rows(db, ProjectMaterialRequirement, project.id), key=lambda item: (item.sort_order, item.id))
+    ]
+    facts = [
+        {"group": row.fact_group, "name": row.name, "unit": row.unit, "source": row.source, "status": row.status}
+        for row in sorted(_filter_project_rows(db, FactItem, project.id), key=lambda item: item.id)
+    ]
+    chapters = [
+        {"no": row.chapter_no, "title": row.title, "owner": row.owner}
+        for row in sorted(_filter_project_rows(db, ReportChapter, project.id), key=lambda item: item.chapter_no)
+    ]
+    artifacts = [
+        {"name": row.name, "format": row.format}
+        for row in sorted(_filter_project_rows(db, Artifact, project.id), key=lambda item: item.id)
+    ]
+    return {"materials": materials, "facts": facts, "chapters": chapters, "artifacts": artifacts}
+
+
+def preview_project_rule_migration(
+    db: Session,
+    project: Project,
+    template_id: str | None = None,
+    template_version: str | None = None,
+    region_rule_id: str | None = None,
+) -> dict[str, Any]:
+    target_rule = get_region_rule_config(db, region_rule_id or getattr(project, "region_rule_id", None))
+    current_blueprint = _project_current_blueprint(db, project)
+    target_blueprint = {
+        "materials": target_rule.get("materials") or [],
+        "facts": target_rule.get("facts") or [],
+        "chapters": target_rule.get("chapters") or [],
+        "artifacts": target_rule.get("artifacts") or [],
+    }
+    sections = {
+        "materials": _diff_rule_items(current_blueprint["materials"], target_blueprint["materials"], "资料清单"),
+        "facts": _diff_rule_items(current_blueprint["facts"], target_blueprint["facts"], "事实框架"),
+        "chapters": _diff_rule_items(current_blueprint["chapters"], target_blueprint["chapters"], "章节目录"),
+        "artifacts": _diff_rule_items(current_blueprint["artifacts"], target_blueprint["artifacts"], "成果项"),
+    }
+    template_changed = (template_id or getattr(project, "template_id", None)) != getattr(project, "template_id", None) or (template_version or getattr(project, "template_version", None)) != getattr(project, "template_version", None)
+    rule_changed = target_rule.get("id") != getattr(project, "region_rule_id", None) or target_rule.get("version") != getattr(project, "initialization_rule_version", None)
+    impact_count = sum(section["impactCount"] for section in sections.values()) + (1 if template_changed else 0) + (1 if rule_changed else 0)
+    if any(section["removed"] for section in sections.values()):
+        risk_level = "严重"
+    elif impact_count >= 5:
+        risk_level = "一般"
+    else:
+        risk_level = "提示"
+    recommendations: list[str] = []
+    if template_changed:
+        recommendations.append("模板版本发生变化，建议在迁移前确认章节样式和输出成果影响。")
+    if rule_changed:
+        recommendations.append("初始化规则发生变化，建议确认新增资料、事实和成果项是否适用于当前项目。")
+    if any(section["removed"] for section in sections.values()):
+        recommendations.append("目标规则少于当前项目骨架，系统不会自动删除现有资料、事实、章节或成果项。")
+    if not recommendations:
+        recommendations.append("未发现明显结构差异，可按需生成迁移计划。")
+    return {
+        "from": {
+            "templateId": getattr(project, "template_id", None),
+            "templateVersion": getattr(project, "template_version", None),
+            "regionRuleId": getattr(project, "region_rule_id", None),
+            "ruleVersion": getattr(project, "initialization_rule_version", None),
+        },
+        "to": {
+            "templateId": template_id or getattr(project, "template_id", None),
+            "templateVersion": template_version or getattr(project, "template_version", None),
+            "regionRuleId": target_rule.get("id"),
+            "ruleVersion": target_rule.get("version"),
+            "ruleName": target_rule.get("name"),
+        },
+        "sections": sections,
+        "impactCount": impact_count,
+        "riskLevel": risk_level,
+        "templateChanged": template_changed,
+        "ruleChanged": rule_changed,
+        "recommendations": recommendations,
+    }
+
+
+def map_rule_migration_plan(row: ProjectRuleMigrationPlan) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "projectId": row.project_id,
+        "fromTemplateId": row.from_template_id,
+        "fromTemplateVersion": row.from_template_version,
+        "fromRegionRuleId": row.from_region_rule_id,
+        "fromRuleVersion": row.from_rule_version,
+        "toTemplateId": row.to_template_id,
+        "toTemplateVersion": row.to_template_version,
+        "toRegionRuleId": row.to_region_rule_id,
+        "toRuleVersion": row.to_rule_version,
+        "status": row.status,
+        "riskLevel": row.risk_level,
+        "diff": row.diff or {},
+        "createdBy": row.created_by,
+        "appliedBy": row.applied_by,
+        "appliedAt": row.applied_at.isoformat() if row.applied_at else None,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _project_migration_plans(db: Session, project_id: str) -> list[ProjectRuleMigrationPlan]:
+    rows = _filter_project_rows(db, ProjectRuleMigrationPlan, project_id)
+    return sorted(rows, key=lambda item: getattr(item, "created_at", None) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+
+
+def create_rule_migration_plan(
+    db: Session,
+    project: Project,
+    user: dict[str, Any],
+    template_id: str | None = None,
+    template_version: str | None = None,
+    region_rule_id: str | None = None,
+) -> ProjectRuleMigrationPlan:
+    diff = preview_project_rule_migration(db, project, template_id, template_version, region_rule_id)
+    row = ProjectRuleMigrationPlan(
+        id=f"PRMP-{int(time.time() * 1000)}",
+        project_id=project.id,
+        from_template_id=diff["from"].get("templateId"),
+        from_template_version=diff["from"].get("templateVersion"),
+        from_region_rule_id=diff["from"].get("regionRuleId"),
+        from_rule_version=diff["from"].get("ruleVersion"),
+        to_template_id=diff["to"].get("templateId"),
+        to_template_version=diff["to"].get("templateVersion"),
+        to_region_rule_id=diff["to"].get("regionRuleId"),
+        to_rule_version=diff["to"].get("ruleVersion"),
+        status="待应用",
+        risk_level=diff["riskLevel"],
+        diff=diff,
+        created_by=user.get("name"),
+        applied_by=None,
+        applied_at=None,
+    )
+    db.add(row)
+    return row
+
+
+def apply_rule_migration_plan(db: Session, project: Project, plan: ProjectRuleMigrationPlan, user: dict[str, Any]) -> dict[str, Any]:
+    if plan.status == "已应用":
+        return plan.diff or {}
+    project.template_id = plan.to_template_id
+    project.template_version = plan.to_template_version
+    project.region_rule_id = plan.to_region_rule_id
+    project.initialization_rule_version = plan.to_rule_version
+    project.updated_at = now_utc()
+    summary = ensure_project_initialization_package(db, project, user)
+    plan.status = "已应用"
+    plan.applied_by = user.get("name")
+    plan.applied_at = now_utc()
+    plan.updated_at = now_utc()
+    diff = dict(plan.diff or {})
+    diff["appliedSummary"] = summary
+    plan.diff = diff
+    return diff
+
+
+def _project_revision_rows(db: Session, project_id: str) -> list[ProjectRevision]:
+    rows = _filter_project_rows(db, ProjectRevision, project_id)
+    return sorted(rows, key=lambda item: getattr(item, "created_at", None) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+
+
+def _project_revision_no(db: Session, project_id: str) -> str:
+    rows = _filter_project_rows(db, ProjectRevision, project_id)
+    return f"R{len(rows) + 1:03d}"
+
+
+def _project_revision_snapshot(db: Session, project: Project) -> dict[str, Any]:
+    summary = map_project_summary(db, project)
+    return {
+        "project": {key: summary.get(key) for key in ["id", "code", "name", "type", "location", "phase", "status", "owner", "templateId", "templateVersion", "region", "regionRuleId", "initializationRuleVersion"]},
+        "stats": summary.get("stats"),
+        "initialization": summary.get("initialization"),
+        "statusGate": summary.get("statusGate"),
+    }
+
+
+def map_project_revision(row: ProjectRevision) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "projectId": row.project_id,
+        "parentRevisionId": row.parent_revision_id,
+        "revisionNo": row.revision_no,
+        "title": row.title,
+        "reason": row.reason,
+        "status": row.status,
+        "baselineSnapshot": row.baseline_snapshot or {},
+        "createdBy": row.created_by,
+        "closedBy": row.closed_by,
+        "closedAt": row.closed_at.isoformat() if row.closed_at else None,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def create_project_revision(db: Session, project: Project, user: dict[str, Any], title: str | None = None, reason: str | None = None) -> ProjectRevision:
+    active_rows = [row for row in _filter_project_rows(db, ProjectRevision, project.id) if row.status == "草稿"]
+    if active_rows:
+        return active_rows[0]
+    rows = _project_revision_rows(db, project.id)
+    parent = rows[0] if rows else None
+    row = ProjectRevision(
+        id=f"PRV-{int(time.time() * 1000)}",
+        project_id=project.id,
+        parent_revision_id=parent.id if parent else None,
+        revision_no=_project_revision_no(db, project.id),
+        title=title or f"{project.name} 修订",
+        reason=reason,
+        status="草稿",
+        baseline_snapshot=_project_revision_snapshot(db, project),
+        created_by=user.get("name"),
+        closed_by=None,
+        closed_at=None,
+    )
+    db.add(row)
+    return row
+
+
+def close_project_revision(db: Session, revision: ProjectRevision, user: dict[str, Any], status: str = "已确认") -> ProjectRevision:
+    revision.status = status
+    revision.closed_by = user.get("name")
+    revision.closed_at = now_utc()
+    revision.updated_at = now_utc()
+    return revision
 
 
 def list_region_rules(db: Session) -> list[dict[str, Any]]:
@@ -499,21 +756,31 @@ def map_project_profile(db: Session, project: Project, user: dict[str, Any]) -> 
     milestones = _filter_project_rows(db, ProjectMilestone, project.id)
     materials = _filter_project_rows(db, ProjectMaterialRequirement, project.id)
     records = _initialization_records(db, project.id)
+    migration_plans = _project_migration_plans(db, project.id)
+    revisions = _project_revision_rows(db, project.id)
     summary = map_project_summary(db, project)
     status = project_status(project)
     can_manage = _can_manage_project(db, project, user)
     close_gate = evaluate_project_status_gate(db, project, "已关闭")
     archive_gate = evaluate_project_status_gate(db, project, "已归档")
+    migration_preview = preview_project_rule_migration(db, project, getattr(project, "template_id", None), getattr(project, "template_version", None), getattr(project, "region_rule_id", None))
     return {
         **summary,
         "members": [map_project_member(db, row) for row in sorted(members, key=lambda item: (item.role, item.user_id))],
         "milestones": [map_milestone(row) for row in sorted(milestones, key=lambda item: (item.sort_order, item.id))],
         "materialRequirements": [map_material_requirement(row) for row in sorted(materials, key=lambda item: (item.sort_order, item.id))],
         "initializationRecords": [map_initialization_record(row) for row in records[:5]],
+        "migrationPlans": [map_rule_migration_plan(row) for row in migration_plans[:5]],
+        "revisions": [map_project_revision(row) for row in revisions[:8]],
+        "migrationPreview": migration_preview,
         "statusGates": {"close": close_gate, "archive": archive_gate},
         "actions": {
             "canEdit": can_manage and status not in {"已归档"},
             "canInitialize": can_manage and status in {"建档中", "进行中"},
+            "canCreateMigrationPlan": can_manage and status in {"建档中", "进行中", "已关闭"},
+            "canApplyMigrationPlan": can_manage and status in {"建档中", "进行中"},
+            "canCreateRevision": can_manage and status in {"已关闭", "已归档", "进行中"},
+            "canCloseRevision": can_manage,
             "canClose": can_manage and status in {"建档中", "进行中"} and close_gate["allowed"],
             "canArchive": can_manage and status == "已关闭" and archive_gate["allowed"],
             "canReopen": can_manage and status in {"已关闭", "已归档"},
@@ -577,6 +844,9 @@ def build_project_center(db: Session, user: dict[str, Any]) -> dict[str, Any]:
             "wizardDraft": True,
             "regionRuleBinding": True,
             "templateDrivenInitialization": True,
+            "migrationDiffPreview": True,
+            "migrationPlanApply": True,
+            "projectRevisionChain": True,
         },
     }
 

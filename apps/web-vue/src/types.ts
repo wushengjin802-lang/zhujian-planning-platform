@@ -141,15 +141,79 @@ export interface ProjectSummary extends Project {
   statusGate?: ProjectStatusGate;
 }
 
+
+export interface ProjectMigrationPreviewSection {
+  label: string;
+  added: Array<Record<string, unknown>>;
+  removed: Array<Record<string, unknown>>;
+  changed: Array<Record<string, unknown>>;
+  impactCount: number;
+}
+
+export interface ProjectMigrationPreview {
+  from: Record<string, unknown>;
+  to: Record<string, unknown>;
+  sections: Record<string, ProjectMigrationPreviewSection>;
+  impactCount: number;
+  riskLevel: string;
+  templateChanged: boolean;
+  ruleChanged: boolean;
+  recommendations: string[];
+}
+
+export interface ProjectRuleMigrationPlan {
+  id: string;
+  projectId: string;
+  fromTemplateId?: string | null;
+  fromTemplateVersion?: string | null;
+  fromRegionRuleId?: string | null;
+  fromRuleVersion?: string | null;
+  toTemplateId?: string | null;
+  toTemplateVersion?: string | null;
+  toRegionRuleId?: string | null;
+  toRuleVersion?: string | null;
+  status: string;
+  riskLevel: string;
+  diff: ProjectMigrationPreview;
+  createdBy?: string | null;
+  appliedBy?: string | null;
+  appliedAt?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ProjectRevision {
+  id: string;
+  projectId: string;
+  parentRevisionId?: string | null;
+  revisionNo: string;
+  title: string;
+  reason?: string | null;
+  status: string;
+  baselineSnapshot: Record<string, unknown>;
+  createdBy?: string | null;
+  closedBy?: string | null;
+  closedAt?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
 export interface ProjectProfile extends ProjectSummary {
   members: ProjectMemberInfo[];
   milestones: ProjectMilestoneInfo[];
   materialRequirements?: ProjectMaterialRequirement[];
   initializationRecords?: ProjectInitializationRecord[];
+  migrationPlans?: ProjectRuleMigrationPlan[];
+  revisions?: ProjectRevision[];
+  migrationPreview?: ProjectMigrationPreview;
   statusGates?: { close?: ProjectStatusGate; archive?: ProjectStatusGate };
   actions?: {
     canEdit?: boolean;
     canInitialize?: boolean;
+    canCreateMigrationPlan?: boolean;
+    canApplyMigrationPlan?: boolean;
+    canCreateRevision?: boolean;
+    canCloseRevision?: boolean;
     canClose?: boolean;
     canArchive?: boolean;
     canReopen?: boolean;
