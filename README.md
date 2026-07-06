@@ -1,0 +1,73 @@
+# 住建项目策划与工程咨询辅助编制平台
+
+第一阶段开发工程。当前目标是按 PDD 技术栈打通 MVP 主链路：
+
+资料上传与解析 -> 事实确认 -> 报告编制 -> 质量审核 -> 成果输出与归档。
+
+## 工程结构
+
+```text
+apps/web-vue    PDD 主线前端：Vue3 + Vite + TypeScript + Element Plus + Pinia + Vue Router
+apps/api-py     PDD 主线后端：FastAPI + SQLAlchemy + Pydantic + Alembic
+apps/worker     Celery 队列说明，任务实现位于 apps/api-py/app/worker
+archive/react-express-prototype 早期 React + Express 原型归档，仅供参考
+packages/shared 共享类型、演示数据和阶段常量
+docs            项目、产品、架构、API、测试、部署文档
+infra           数据库、部署和运维脚本
+templates       报告、Excel、提示词和质量规则模板
+samples         演示项目资料
+```
+
+## 本地启动
+
+```bash
+npm install
+python -m pip install -r apps/api-py/requirements.txt
+npm run api:migrate
+npm run dev
+```
+
+默认地址：
+
+- 前端：http://localhost:5173
+- API：http://localhost:8787
+- MinIO 控制台：http://localhost:9001
+
+Redis 与 MinIO 可通过以下命令启动：
+
+```bash
+docker compose -f infra/docker/docker-compose.pdd.yml up -d
+```
+
+## 技术栈主线
+
+当前正式主线已回到 PDD 要求：
+
+- 前端：`apps/web-vue`，Vue3 + Element Plus + Pinia + Vue Router；
+- 后端：`apps/api-py`，FastAPI + SQLAlchemy + Pydantic；
+- 迁移：Alembic，目标数据库 `zhujian`、schema `public`；
+- 异步任务：Celery + Redis，队列按 `parse/ai/export/calc` 分流；
+- 对象存储：MinIO/S3 接入，开发环境支持本地兜底；
+- 成果导出：Python Office 工具链生成 Word、Excel 和归档包。
+- LibreOffice：配置 `LIBREOFFICE_PATH` 或安装 `soffice` 后，归档包会附带 PDF 转换结果；
+- 模型网关：配置 `MODEL_GATEWAY_URL` 后章节生成优先走网关，不可用时自动降级到本地可审计 fallback；
+- 平台能力状态：系统管理页和 `/api/platform/status` 可查看 Redis、MinIO、PostGIS、pgvector、LibreOffice、模型网关状态。
+
+原 React + Express 实现已移至 `archive/react-express-prototype`，不再作为正式第一阶段主线扩展。
+
+## 环境注意
+
+远端 PostgreSQL 当前可连接并已完成 Alembic 业务表迁移。`zhujian.public` 已启用 `PostGIS 3.4.4` 与 `pgvector 0.8.1`，`document_chunks.embedding vector(1536)` 和 ivfflat 向量索引已创建。
+
+## 第一阶段验收
+
+```bash
+npm run api:migrate
+python scripts/phase1_acceptance.py
+npm run typecheck
+npm run build
+```
+
+## 第一阶段边界
+
+本阶段聚焦正式咨询成果编制闭环。方案决策、冻结后变更和效果图任务书保留产品入口与数据结构，完整能力放入第三阶段。
