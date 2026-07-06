@@ -22,7 +22,7 @@ from app.db.models import (
     ReportChapter,
     ReportTemplate,
 )
-from app.services.project_center import add_default_milestones, apply_rule_migration_plan, build_project_center, create_project_revision, create_rule_migration_plan, evaluate_project_status_gate, ensure_project_initialization_package, map_project_profile, preview_project_rule_migration
+from app.services.project_center import add_default_milestones, apply_rule_migration_plan, approve_rule_migration_plan, assert_project_writable, build_project_center, create_project_revision, create_rule_migration_plan, evaluate_project_status_gate, ensure_project_initialization_package, map_project_profile, preview_project_rule_migration, reject_rule_migration_plan, rollback_rule_migration_plan
 
 
 class ScalarRows:
@@ -143,7 +143,7 @@ class ProjectCenterTest(unittest.TestCase):
         project.archived_at = None
         db = FakeSession({Project: [project], ProjectMember: [], ProjectMilestone: [], ProjectMaterialRequirement: [], ProjectInitializationRecord: [], FactItem: [], ReportChapter: [], Artifact: []})
         summary = ensure_project_initialization_package(db, project, {"id": "U1", "name": "张工", "role": "项目负责人"})
-        self.assertEqual(summary["packageVersion"], "v2.3")
+        self.assertEqual(summary["packageVersion"], "v2.4")
         self.assertGreaterEqual(len(db.rows_by_model[ProjectMaterialRequirement]), 5)
         self.assertGreaterEqual(len(db.rows_by_model[FactItem]), 5)
         self.assertGreaterEqual(len(db.rows_by_model[ReportChapter]), 6)
@@ -231,11 +231,45 @@ class ProjectCenterTest(unittest.TestCase):
         self.assertTrue(preview["ruleChanged"])
         self.assertGreater(preview["impactCount"], 0)
         plan = create_rule_migration_plan(db, project, {"id": "U1", "name": "张工"}, "TPL-NEW", "v2.0", "BUILTIN-GOV-INVESTMENT")
-        self.assertEqual(plan.status, "待应用")
+        self.assertEqual(plan.status, "待审批")
+        approve_rule_migration_plan(db, plan, {"id": "U2", "name": "审核人"}, "同意迁移")
+        self.assertEqual(plan.status, "已审批")
         apply_rule_migration_plan(db, project, plan, {"id": "U1", "name": "张工"})
         self.assertEqual(plan.status, "已应用")
         self.assertEqual(project.template_id, "TPL-NEW")
         self.assertEqual(project.region_rule_id, "BUILTIN-GOV-INVESTMENT")
+        rollback_rule_migration_plan(db, project, plan, {"id": "U1", "name": "张工"}, "恢复旧规则")
+        self.assertEqual(plan.status, "已回滚")
+        self.assertEqual(project.template_id, "TPL-OLD")
+        self.assertEqual(project.region_rule_id, "BUILTIN-COMMON")
+
+    def test_migration_plan_reject_and_closed_project_readonly_boundary(self):
+        now = datetime.now(timezone.utc)
+        project = Project(id="P008", name="关闭项目", type="可研", location="南京", phase="项目关闭", owner="张工", progress=100, risk="一般")
+        project.code = "ZJ-2026-0008"
+        project.status = "已关闭"
+        project.confidentiality = "内部"
+        project.template_id = "TPL-OLD"
+        project.template_version = "v1.0"
+        project.region = "全国"
+        project.region_rule_id = "BUILTIN-COMMON"
+        project.initialization_rule_version = "v2.4"
+        project.draft_source_id = None
+        project.planned_start = None
+        project.planned_end = None
+        project.description = None
+        project.archived_at = None
+        project.created_at = now
+        project.updated_at = now
+        db = FakeSession({Project: [project], ProjectRuleMigrationPlan: [], ProjectMaterialRequirement: [], ProjectRegionRule: [], ProjectMember: [], ProjectMilestone: [], ProjectInitializationRecord: [], FactItem: [], ReportChapter: [], Artifact: [], QualityIssue: [], ProjectDocument: [], QualityCheckJob: []})
+        plan = create_rule_migration_plan(db, project, {"id": "U1", "name": "张工"}, "TPL-NEW", "v2.0", "BUILTIN-GOV-INVESTMENT")
+        reject_rule_migration_plan(db, plan, {"id": "U2", "name": "审核人"}, "资料不足")
+        self.assertEqual(plan.status, "已驳回")
+        with self.assertRaises(ValueError):
+            assert_project_writable(project, "维护项目成员")
+        profile = map_project_profile(db, project, {"id": "U1", "name": "张工", "role": "项目负责人"})
+        self.assertTrue(profile["actions"]["readonly"])
+        self.assertFalse(profile["actions"]["canEdit"])
 
     def test_project_revision_chain_creates_single_draft_revision(self):
         now = datetime.now(timezone.utc)

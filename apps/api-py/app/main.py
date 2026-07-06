@@ -49,7 +49,7 @@ from app.services.artifacts import generate_artifact
 from app.services.auth import authenticate_user, get_session_user, logout_session
 from app.services.capabilities import platform_status
 from app.services.dashboard import build_dashboard
-from app.services.project_center import add_default_milestones, apply_project_defaults, apply_rule_migration_plan, build_project_center, can_change_status, close_project_revision, create_project_revision, create_rule_migration_plan, ensure_project_initialization_package, ensure_project_member, evaluate_project_status_gate, generate_project_code, list_project_drafts, list_region_rules, map_milestone, map_material_requirement, map_project_draft, map_project_profile, map_project_revision, map_project_summary, map_region_rule, map_rule_migration_plan, preview_project_rule_migration, upsert_project_draft
+from app.services.project_center import add_default_milestones, apply_project_defaults, apply_rule_migration_plan, approve_rule_migration_plan, assert_project_writable, build_project_center, can_change_status, close_project_revision, create_project_revision, create_rule_migration_plan, ensure_project_initialization_package, ensure_project_member, evaluate_project_status_gate, generate_project_code, list_project_drafts, list_region_rules, map_milestone, map_material_requirement, map_project_draft, map_project_profile, map_project_revision, map_project_summary, map_region_rule, map_rule_migration_plan, preview_project_rule_migration, reject_rule_migration_plan, rollback_rule_migration_plan, upsert_project_draft
 from app.services.workbench import add_task_event, add_workbench_event, assert_project_visible, assert_review_approval_gate, is_management_role, map_task_event, map_workbench_event
 from app.services.documents import parse_document
 from app.services.estimates import calculate_estimate, confirm_estimate, get_estimate, map_estimate
@@ -172,6 +172,10 @@ class ProjectMigrationPlanInput(BaseModel):
     templateId: str | None = None
     templateVersion: str | None = None
     regionRuleId: str | None = None
+
+
+class ProjectMigrationDecisionInput(BaseModel):
+    comment: str | None = None
 
 
 class ProjectRevisionInput(BaseModel):
@@ -1087,6 +1091,10 @@ def update_project(project_id: str, payload: ProjectUpdate, db: Session = Depend
         raise HTTPException(status_code=403, detail=str(exc))
     if not is_management_role(user.get("role")) and project.owner != user.get("name"):
         raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可修改项目基本信息")
+    try:
+        assert_project_writable(project, "修改项目基本信息")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     fields = payload.model_dump(exclude_none=True)
     mapping = {"templateId": "template_id", "templateVersion": "template_version", "regionRuleId": "region_rule_id", "draftId": "draft_source_id", "plannedStart": "planned_start", "plannedEnd": "planned_end"}
     for key, value in fields.items():
@@ -1111,6 +1119,10 @@ def add_project_member(project_id: str, payload: ProjectMemberInput, db: Session
         raise HTTPException(status_code=403, detail=str(exc))
     if not is_management_role(user.get("role")) and project.owner != user.get("name"):
         raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可维护成员")
+    try:
+        assert_project_writable(project, "维护项目成员")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if not db.get(AppUser, payload.userId):
         raise HTTPException(status_code=404, detail="User not found")
     member = ensure_project_member(db, project_id, payload.userId, payload.role)
@@ -1131,6 +1143,10 @@ def remove_project_member(project_id: str, user_id: str, db: Session = Depends(g
         raise HTTPException(status_code=403, detail=str(exc))
     if not is_management_role(user.get("role")) and project.owner != user.get("name"):
         raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可维护成员")
+    try:
+        assert_project_writable(project, "维护项目成员")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     member = db.get(ProjectMember, {"project_id": project_id, "user_id": user_id})
     if not member:
         raise HTTPException(status_code=404, detail="Project member not found")
@@ -1150,6 +1166,10 @@ def add_project_milestone(project_id: str, payload: ProjectMilestoneInput, db: S
         assert_project_visible(db, user, project_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    try:
+        assert_project_writable(project, "维护项目里程碑")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     row = ProjectMilestone(
         id=f"PM-{int(time.time() * 1000)}",
         project_id=project_id,
@@ -1177,6 +1197,10 @@ def update_project_milestone(project_id: str, milestone_id: str, payload: Projec
         assert_project_visible(db, user, project_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    try:
+        assert_project_writable(project, "维护项目里程碑")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     row.name = payload.name.strip()
     row.owner = payload.owner
     row.status = payload.status
@@ -1201,6 +1225,10 @@ def initialize_project_package(project_id: str, db: Session = Depends(get_db), u
         raise HTTPException(status_code=403, detail=str(exc))
     if not is_management_role(user.get("role")) and project.owner != user.get("name"):
         raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可初始化项目包")
+    try:
+        assert_project_writable(project, "初始化项目包")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     summary = ensure_project_initialization_package(db, project, user)
     write_audit(db, user["name"], "initialize_project_package", "project", project_id, summary)
     db.commit()
@@ -1219,6 +1247,10 @@ def update_project_material(project_id: str, material_id: str, payload: ProjectM
         raise HTTPException(status_code=403, detail=str(exc))
     if not is_management_role(user.get("role")) and project.owner != user.get("name"):
         raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可维护资料清单")
+    try:
+        assert_project_writable(project, "维护资料清单")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if payload.status not in {"待上传", "已上传", "已确认", "不适用"}:
         raise HTTPException(status_code=400, detail="Unsupported material status")
     row.status = payload.status
@@ -1269,6 +1301,70 @@ def create_project_migration_plan(project_id: str, payload: ProjectMigrationPlan
     return map_rule_migration_plan(row)
 
 
+@app.post("/api/projects/{project_id}/migration-plans/{plan_id}/approve")
+def approve_project_migration_plan(project_id: str, plan_id: str, payload: ProjectMigrationDecisionInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    plan = db.get(ProjectRuleMigrationPlan, plan_id)
+    if not project or not plan or plan.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Migration plan not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可审批迁移计划")
+    try:
+        approve_rule_migration_plan(db, plan, user, payload.comment)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    write_audit(db, user["name"], "approve_project_migration_plan", "project_rule_migration_plan", plan.id, payload.model_dump())
+    db.commit()
+    return map_rule_migration_plan(plan)
+
+
+@app.post("/api/projects/{project_id}/migration-plans/{plan_id}/reject")
+def reject_project_migration_plan(project_id: str, plan_id: str, payload: ProjectMigrationDecisionInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    plan = db.get(ProjectRuleMigrationPlan, plan_id)
+    if not project or not plan or plan.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Migration plan not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可驳回迁移计划")
+    try:
+        reject_rule_migration_plan(db, plan, user, payload.comment)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    write_audit(db, user["name"], "reject_project_migration_plan", "project_rule_migration_plan", plan.id, payload.model_dump())
+    db.commit()
+    return map_rule_migration_plan(plan)
+
+
+@app.post("/api/projects/{project_id}/migration-plans/{plan_id}/rollback")
+def rollback_project_migration_plan(project_id: str, plan_id: str, payload: ProjectMigrationDecisionInput, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
+    project = db.get(Project, project_id)
+    plan = db.get(ProjectRuleMigrationPlan, plan_id)
+    if not project or not plan or plan.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Migration plan not found")
+    try:
+        assert_project_visible(db, user, project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if not is_management_role(user.get("role")) and project.owner != user.get("name"):
+        raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可回滚迁移计划")
+    try:
+        assert_project_writable(project, "回滚迁移计划")
+        rollback_rule_migration_plan(db, project, plan, user, payload.comment)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    write_audit(db, user["name"], "rollback_project_migration_plan", "project_rule_migration_plan", plan.id, payload.model_dump())
+    db.commit()
+    return map_project_profile(db, project, user)
+
+
 @app.post("/api/projects/{project_id}/migration-plans/{plan_id}/apply")
 def apply_project_migration_plan(project_id: str, plan_id: str, db: Session = Depends(get_db), user: dict = Depends(current_user)) -> dict:
     project = db.get(Project, project_id)
@@ -1281,7 +1377,14 @@ def apply_project_migration_plan(project_id: str, plan_id: str, db: Session = De
         raise HTTPException(status_code=403, detail=str(exc))
     if not is_management_role(user.get("role")) and project.owner != user.get("name"):
         raise HTTPException(status_code=403, detail="仅项目负责人或管理角色可应用迁移计划")
-    apply_rule_migration_plan(db, project, plan, user)
+    try:
+        assert_project_writable(project, "应用迁移计划")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    try:
+        apply_rule_migration_plan(db, project, plan, user)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     write_audit(db, user["name"], "apply_project_migration_plan", "project_rule_migration_plan", plan.id, {"projectId": project_id})
     db.commit()
     return map_project_profile(db, project, user)

@@ -5,6 +5,7 @@ import { usePlatformStore } from "../stores/platform";
 import {
   addProjectMember,
   addProjectMilestone,
+  approveProjectMigrationPlan,
   changeProjectStatus,
   createProjectMigrationPlan,
   createProjectRevision,
@@ -12,6 +13,8 @@ import {
   initializeProjectPackage,
   loadProjectMigrationPreview,
   applyProjectMigrationPlan,
+  rejectProjectMigrationPlan,
+  rollbackProjectMigrationPlan,
   copyProject,
   createProject,
   loadProjectCenter,
@@ -251,12 +254,36 @@ async function createMigrationPlan() {
   ElMessage.success("迁移计划已生成");
 }
 
+async function approveMigrationPlan(planId: string) {
+  if (!profile.value) return;
+  const { value } = await ElMessageBox.prompt("请输入审批意见，可留空", "审批迁移计划", { confirmButtonText: "通过", cancelButtonText: "取消", inputPlaceholder: "审批意见" });
+  await approveProjectMigrationPlan(profile.value.id, planId, value);
+  await reload(profile.value.id);
+  ElMessage.success("迁移计划已审批通过");
+}
+
+async function rejectMigrationPlan(planId: string) {
+  if (!profile.value) return;
+  const { value } = await ElMessageBox.prompt("请输入驳回原因", "驳回迁移计划", { confirmButtonText: "驳回", cancelButtonText: "取消", inputPlaceholder: "驳回原因" });
+  await rejectProjectMigrationPlan(profile.value.id, planId, value);
+  await reload(profile.value.id);
+  ElMessage.success("迁移计划已驳回");
+}
+
 async function applyMigrationPlan(planId: string) {
   if (!profile.value) return;
   await ElMessageBox.confirm("应用迁移计划会更新项目模板/地区规则并补齐初始化包，不会删除现有资料、事实、章节和成果项。确认应用？", "应用迁移计划", { type: "warning" });
   await applyProjectMigrationPlan(profile.value.id, planId);
   await reload(profile.value.id);
   ElMessage.success("迁移计划已应用");
+}
+
+async function rollbackMigrationPlan(planId: string) {
+  if (!profile.value) return;
+  const { value } = await ElMessageBox.prompt("回滚只恢复模板/地区规则指针，不删除迁移期间补齐的项目骨架。请输入回滚说明，可留空。", "回滚迁移计划", { confirmButtonText: "回滚", cancelButtonText: "取消", inputPlaceholder: "回滚说明" });
+  await rollbackProjectMigrationPlan(profile.value.id, planId, value);
+  await reload(profile.value.id);
+  ElMessage.success("迁移计划已回滚");
 }
 
 async function createRevision() {
@@ -432,7 +459,10 @@ onMounted(() => reload());
 
       <el-tabs v-model="activeTab">
         <el-tab-pane label="基本信息" name="profile">
-          <el-form label-position="top">
+          <el-alert v-if="profile.actions?.readonly" type="warning" show-icon :closable="false" style="margin-bottom: 12px">
+            <template #title>{{ profile.actions?.readonlyReason || '当前项目处于只读状态，项目中心基础资料不可直接修改。' }}</template>
+          </el-alert>
+          <el-form label-position="top" :disabled="!profile.actions?.canEdit">
             <el-row :gutter="14">
               <el-col :span="12"><el-form-item label="项目名称"><el-input v-model="profile.name" /></el-form-item></el-col>
               <el-col :span="12"><el-form-item label="项目编号"><el-input :model-value="profile.code" disabled /></el-form-item></el-col>
@@ -469,7 +499,7 @@ onMounted(() => reload());
             <div class="topbar-actions">
               <el-select v-model="memberForm.userId" filterable placeholder="选择用户" style="width: 220px"><el-option v-for="user in userOptions" :key="user.id" :label="`${user.name}｜${user.department}`" :value="user.id" /></el-select>
               <el-select v-model="memberForm.role" style="width: 160px"><el-option v-for="role in ['项目负责人','项目管理员','编制人员','审核人员','项目成员']" :key="role" :label="role" :value="role" /></el-select>
-              <el-button type="primary" @click="addMemberToProfile">添加/更新成员</el-button>
+              <el-button type="primary" :disabled="!profile.actions?.canEdit" @click="addMemberToProfile">添加/更新成员</el-button>
             </div>
           </div>
           <el-table :data="profile.members" border>
@@ -477,7 +507,7 @@ onMounted(() => reload());
             <el-table-column prop="department" label="部门" />
             <el-table-column prop="role" label="项目角色" />
             <el-table-column prop="email" label="邮箱" />
-            <el-table-column label="操作" width="120"><template #default="scope"><el-button link type="danger" @click="removeMember(scope.row.userId)">移除</el-button></template></el-table-column>
+            <el-table-column label="操作" width="120"><template #default="scope"><el-button link type="danger" :disabled="!profile.actions?.canEdit" @click="removeMember(scope.row.userId)">移除</el-button></template></el-table-column>
           </el-table>
         </el-tab-pane>
 
@@ -487,7 +517,7 @@ onMounted(() => reload());
               <el-input v-model="milestoneForm.name" placeholder="里程碑名称" style="width: 180px" />
               <el-input v-model="milestoneForm.owner" placeholder="负责人" style="width: 140px" />
               <el-input v-model="milestoneForm.dueAt" placeholder="YYYY-MM-DD" style="width: 140px" />
-              <el-button type="primary" @click="addMilestoneToProfile">添加里程碑</el-button>
+              <el-button type="primary" :disabled="!profile.actions?.canEdit" @click="addMilestoneToProfile">添加里程碑</el-button>
             </div>
           </div>
           <el-table :data="profile.milestones" border>
@@ -495,7 +525,7 @@ onMounted(() => reload());
             <el-table-column label="负责人" width="150"><template #default="scope"><el-input v-model="scope.row.owner" /></template></el-table-column>
             <el-table-column label="状态" width="130"><template #default="scope"><el-select v-model="scope.row.status"><el-option v-for="status in ['未开始','进行中','已完成','已逾期']" :key="status" :label="status" :value="status" /></el-select></template></el-table-column>
             <el-table-column label="计划日期" width="150"><template #default="scope"><el-input v-model="scope.row.dueAt" /></template></el-table-column>
-            <el-table-column label="操作" width="120"><template #default="scope"><el-button type="primary" link @click="saveMilestone(scope.row)">保存</el-button></template></el-table-column>
+            <el-table-column label="操作" width="120"><template #default="scope"><el-button type="primary" link :disabled="!profile.actions?.canEdit" @click="saveMilestone(scope.row)">保存</el-button></template></el-table-column>
           </el-table>
         </el-tab-pane>
 
@@ -601,9 +631,20 @@ onMounted(() => reload());
             <el-table-column prop="id" label="计划ID" width="190" />
             <el-table-column prop="status" label="状态" width="100" />
             <el-table-column prop="riskLevel" label="风险" width="100" />
+            <el-table-column label="审批/回滚" min-width="220"><template #default="scope">
+              <span v-if="scope.row.approval?.approvedBy">通过：{{ scope.row.approval.approvedBy }}</span>
+              <span v-else-if="scope.row.rejection?.rejectedBy">驳回：{{ scope.row.rejection.rejectedBy }}</span>
+              <span v-else-if="scope.row.rollback?.rolledBackBy">回滚：{{ scope.row.rollback.rolledBackBy }}</span>
+              <span v-else>待处理</span>
+            </template></el-table-column>
             <el-table-column label="目标规则" min-width="220"><template #default="scope">{{ scope.row.toRegionRuleId }} / {{ scope.row.toRuleVersion }}</template></el-table-column>
             <el-table-column prop="createdBy" label="创建人" width="120" />
-            <el-table-column label="操作" width="120"><template #default="scope"><el-button link type="primary" :disabled="scope.row.status === '已应用' || !profile.actions?.canApplyMigrationPlan" @click="applyMigrationPlan(scope.row.id)">应用</el-button></template></el-table-column>
+            <el-table-column label="操作" width="260"><template #default="scope">
+              <el-button link type="success" :disabled="!scope.row.actions?.canApprove || !profile.actions?.canApproveMigrationPlan" @click="approveMigrationPlan(scope.row.id)">审批</el-button>
+              <el-button link type="warning" :disabled="!scope.row.actions?.canReject || !profile.actions?.canRejectMigrationPlan" @click="rejectMigrationPlan(scope.row.id)">驳回</el-button>
+              <el-button link type="primary" :disabled="!scope.row.actions?.canApply || !profile.actions?.canApplyMigrationPlan" @click="applyMigrationPlan(scope.row.id)">应用</el-button>
+              <el-button link type="danger" :disabled="!scope.row.actions?.canRollback || !profile.actions?.canRollbackMigrationPlan" @click="rollbackMigrationPlan(scope.row.id)">回滚</el-button>
+            </template></el-table-column>
           </el-table>
 
           <el-divider content-position="left">项目修订链</el-divider>

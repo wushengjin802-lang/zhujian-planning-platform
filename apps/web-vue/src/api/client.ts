@@ -136,8 +136,20 @@ export function createProjectMigrationPlan(projectId: string, input: { templateI
   return request<ProjectRuleMigrationPlan>(`/api/projects/${projectId}/migration-plans`, { method: "POST", body: JSON.stringify(input) });
 }
 
+export function approveProjectMigrationPlan(projectId: string, planId: string, comment?: string) {
+  return request<ProjectRuleMigrationPlan>(`/api/projects/${projectId}/migration-plans/${planId}/approve`, { method: "POST", body: JSON.stringify({ comment }) });
+}
+
+export function rejectProjectMigrationPlan(projectId: string, planId: string, comment?: string) {
+  return request<ProjectRuleMigrationPlan>(`/api/projects/${projectId}/migration-plans/${planId}/reject`, { method: "POST", body: JSON.stringify({ comment }) });
+}
+
 export function applyProjectMigrationPlan(projectId: string, planId: string) {
   return request<ProjectProfile>(`/api/projects/${projectId}/migration-plans/${planId}/apply`, { method: "POST" });
+}
+
+export function rollbackProjectMigrationPlan(projectId: string, planId: string, comment?: string) {
+  return request<ProjectProfile>(`/api/projects/${projectId}/migration-plans/${planId}/rollback`, { method: "POST", body: JSON.stringify({ comment }) });
 }
 
 export function createProjectRevision(projectId: string, input: { title?: string; reason?: string }) {

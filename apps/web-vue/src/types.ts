@@ -175,6 +175,10 @@ export interface ProjectRuleMigrationPlan {
   status: string;
   riskLevel: string;
   diff: ProjectMigrationPreview;
+  approval?: Record<string, unknown>;
+  rejection?: Record<string, unknown>;
+  rollback?: Record<string, unknown>;
+  actions?: { canApprove?: boolean; canReject?: boolean; canApply?: boolean; canRollback?: boolean; canViewDiff?: boolean };
   createdBy?: string | null;
   appliedBy?: string | null;
   appliedAt?: string | null;
@@ -208,10 +212,15 @@ export interface ProjectProfile extends ProjectSummary {
   migrationPreview?: ProjectMigrationPreview;
   statusGates?: { close?: ProjectStatusGate; archive?: ProjectStatusGate };
   actions?: {
+    readonly?: boolean;
+    readonlyReason?: string | null;
     canEdit?: boolean;
     canInitialize?: boolean;
     canCreateMigrationPlan?: boolean;
+    canApproveMigrationPlan?: boolean;
+    canRejectMigrationPlan?: boolean;
     canApplyMigrationPlan?: boolean;
+    canRollbackMigrationPlan?: boolean;
     canCreateRevision?: boolean;
     canCloseRevision?: boolean;
     canClose?: boolean;

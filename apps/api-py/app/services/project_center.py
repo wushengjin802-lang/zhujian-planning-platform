@@ -30,7 +30,7 @@ from app.services.workbench import is_management_role, visible_project_ids
 
 PROJECT_STATUSES = ["建档中", "进行中", "已关闭", "已归档"]
 CONFIDENTIALITY_LEVELS = ["公开", "内部", "秘密", "机密"]
-INITIALIZATION_PACKAGE_VERSION = "v2.3"
+INITIALIZATION_PACKAGE_VERSION = "v2.4"
 DEFAULT_MILESTONES = [
     ("资料清点", "资料负责人", 1),
     ("事实确认", "咨询负责人", 2),
@@ -74,7 +74,7 @@ BUILTIN_REGION_RULES: list[dict[str, Any]] = [
         "name": "通用项目初始化规则",
         "region": "全国",
         "projectType": "通用",
-        "version": "v2.3",
+        "version": "v2.4",
         "status": "已发布",
         "description": "适用于未配置地区规则的项目，采用PDD一期通用资料、事实、章节和成果骨架。",
         "materials": [
@@ -96,7 +96,7 @@ BUILTIN_REGION_RULES: list[dict[str, Any]] = [
         "name": "政府投资项目规则",
         "region": "全国",
         "projectType": "政府投资",
-        "version": "v2.3",
+        "version": "v2.4",
         "status": "已发布",
         "description": "面向政府投资类项目，额外关注财政资金、立项依据、绩效目标和用地合规。",
         "materials": [
@@ -405,6 +405,11 @@ def preview_project_rule_migration(
 
 
 def map_rule_migration_plan(row: ProjectRuleMigrationPlan) -> dict[str, Any]:
+    diff = row.diff or {}
+    approval = diff.get("approval") or {}
+    rejection = diff.get("rejection") or {}
+    rollback = diff.get("rollback") or {}
+    actions = migration_plan_actions(row)
     return {
         "id": row.id,
         "projectId": row.project_id,
@@ -418,7 +423,11 @@ def map_rule_migration_plan(row: ProjectRuleMigrationPlan) -> dict[str, Any]:
         "toRuleVersion": row.to_rule_version,
         "status": row.status,
         "riskLevel": row.risk_level,
-        "diff": row.diff or {},
+        "diff": diff,
+        "approval": approval,
+        "rejection": rejection,
+        "rollback": rollback,
+        "actions": actions,
         "createdBy": row.created_by,
         "appliedBy": row.applied_by,
         "appliedAt": row.applied_at.isoformat() if row.applied_at else None,
@@ -452,7 +461,7 @@ def create_rule_migration_plan(
         to_template_version=diff["to"].get("templateVersion"),
         to_region_rule_id=diff["to"].get("regionRuleId"),
         to_rule_version=diff["to"].get("ruleVersion"),
-        status="待应用",
+        status="待审批",
         risk_level=diff["riskLevel"],
         diff=diff,
         created_by=user.get("name"),
@@ -463,9 +472,58 @@ def create_rule_migration_plan(
     return row
 
 
+def migration_plan_actions(row: ProjectRuleMigrationPlan) -> dict[str, bool]:
+    status = row.status
+    return {
+        "canApprove": status == "待审批",
+        "canReject": status == "待审批",
+        "canApply": status in {"已审批", "待应用"},
+        "canRollback": status == "已应用",
+        "canViewDiff": True,
+    }
+
+
+def approve_rule_migration_plan(db: Session, plan: ProjectRuleMigrationPlan, user: dict[str, Any], comment: str | None = None) -> ProjectRuleMigrationPlan:
+    if plan.status not in {"待审批", "已审批"}:
+        raise ValueError(f"当前迁移计划状态 {plan.status} 不允许审批通过")
+    diff = dict(plan.diff or {})
+    diff["approval"] = {
+        "approvedBy": user.get("name"),
+        "approvedAt": now_utc().isoformat(),
+        "comment": comment,
+    }
+    plan.diff = diff
+    plan.status = "已审批"
+    plan.updated_at = now_utc()
+    return plan
+
+
+def reject_rule_migration_plan(db: Session, plan: ProjectRuleMigrationPlan, user: dict[str, Any], comment: str | None = None) -> ProjectRuleMigrationPlan:
+    if plan.status not in {"待审批", "已审批"}:
+        raise ValueError(f"当前迁移计划状态 {plan.status} 不允许驳回")
+    diff = dict(plan.diff or {})
+    diff["rejection"] = {
+        "rejectedBy": user.get("name"),
+        "rejectedAt": now_utc().isoformat(),
+        "comment": comment,
+    }
+    plan.diff = diff
+    plan.status = "已驳回"
+    plan.updated_at = now_utc()
+    return plan
+
+
 def apply_rule_migration_plan(db: Session, project: Project, plan: ProjectRuleMigrationPlan, user: dict[str, Any]) -> dict[str, Any]:
     if plan.status == "已应用":
         return plan.diff or {}
+    if plan.status not in {"已审批", "待应用"}:
+        raise ValueError("迁移计划必须先审批通过后才能应用")
+    previous = {
+        "templateId": project.template_id,
+        "templateVersion": project.template_version,
+        "regionRuleId": project.region_rule_id,
+        "ruleVersion": project.initialization_rule_version,
+    }
     project.template_id = plan.to_template_id
     project.template_version = plan.to_template_version
     project.region_rule_id = plan.to_region_rule_id
@@ -477,8 +535,37 @@ def apply_rule_migration_plan(db: Session, project: Project, plan: ProjectRuleMi
     plan.applied_at = now_utc()
     plan.updated_at = now_utc()
     diff = dict(plan.diff or {})
+    diff["previousProjectSettings"] = previous
     diff["appliedSummary"] = summary
     plan.diff = diff
+    return diff
+
+
+def rollback_rule_migration_plan(db: Session, project: Project, plan: ProjectRuleMigrationPlan, user: dict[str, Any], comment: str | None = None) -> dict[str, Any]:
+    if plan.status != "已应用":
+        raise ValueError("仅已应用的迁移计划可回滚")
+    diff = dict(plan.diff or {})
+    previous = diff.get("previousProjectSettings") or {
+        "templateId": plan.from_template_id,
+        "templateVersion": plan.from_template_version,
+        "regionRuleId": plan.from_region_rule_id,
+        "ruleVersion": plan.from_rule_version,
+    }
+    project.template_id = previous.get("templateId")
+    project.template_version = previous.get("templateVersion")
+    project.region_rule_id = previous.get("regionRuleId")
+    project.initialization_rule_version = previous.get("ruleVersion")
+    project.updated_at = now_utc()
+    diff["rollback"] = {
+        "rolledBackBy": user.get("name"),
+        "rolledBackAt": now_utc().isoformat(),
+        "comment": comment,
+        "restored": previous,
+        "note": "回滚只恢复项目模板/地区规则指针，不删除迁移期间补齐的资料、事实、章节或成果项。",
+    }
+    plan.diff = diff
+    plan.status = "已回滚"
+    plan.updated_at = now_utc()
     return diff
 
 
@@ -744,6 +831,25 @@ def map_project_summary(db: Session, project: Project) -> dict[str, Any]:
     }
 
 
+def is_project_readonly(project: Project) -> bool:
+    return project_status(project) in {"已关闭", "已归档"}
+
+
+def project_readonly_reason(project: Project) -> str | None:
+    status = project_status(project)
+    if status == "已关闭":
+        return "项目已关闭，仅允许重新打开、归档、创建修订和受控迁移审批操作。"
+    if status == "已归档":
+        return "项目已归档，项目中心基础资料只读，仅允许重新打开或复制项目。"
+    return None
+
+
+def assert_project_writable(project: Project, action: str = "修改项目") -> None:
+    reason = project_readonly_reason(project)
+    if reason:
+        raise ValueError(f"{action}被项目状态只读边界阻止：{reason}")
+
+
 def _can_manage_project(db: Session, project: Project, user: dict[str, Any]) -> bool:
     if is_management_role(user.get("role")) or project.owner == user.get("name"):
         return True
@@ -775,10 +881,15 @@ def map_project_profile(db: Session, project: Project, user: dict[str, Any]) -> 
         "migrationPreview": migration_preview,
         "statusGates": {"close": close_gate, "archive": archive_gate},
         "actions": {
-            "canEdit": can_manage and status not in {"已归档"},
+            "readonly": is_project_readonly(project),
+            "readonlyReason": project_readonly_reason(project),
+            "canEdit": can_manage and not is_project_readonly(project),
             "canInitialize": can_manage and status in {"建档中", "进行中"},
             "canCreateMigrationPlan": can_manage and status in {"建档中", "进行中", "已关闭"},
+            "canApproveMigrationPlan": can_manage and status in {"建档中", "进行中", "已关闭"},
+            "canRejectMigrationPlan": can_manage and status in {"建档中", "进行中", "已关闭"},
             "canApplyMigrationPlan": can_manage and status in {"建档中", "进行中"},
+            "canRollbackMigrationPlan": can_manage and status in {"建档中", "进行中"},
             "canCreateRevision": can_manage and status in {"已关闭", "已归档", "进行中"},
             "canCloseRevision": can_manage,
             "canClose": can_manage and status in {"建档中", "进行中"} and close_gate["allowed"],
@@ -847,6 +958,9 @@ def build_project_center(db: Session, user: dict[str, Any]) -> dict[str, Any]:
             "migrationDiffPreview": True,
             "migrationPlanApply": True,
             "projectRevisionChain": True,
+            "migrationApprovalFlow": True,
+            "migrationRollback": True,
+            "readonlyProjectBoundary": True,
         },
     }
 
