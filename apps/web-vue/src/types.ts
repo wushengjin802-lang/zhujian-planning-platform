@@ -198,6 +198,8 @@ export interface DashboardProjectSummary {
   openIssues: number;
 }
 
+export type DashboardDueStatus = "none" | "normal" | "due_soon" | "overdue";
+
 export interface DashboardWorkItem {
   id: string;
   category: string;
@@ -212,9 +214,18 @@ export interface DashboardWorkItem {
   route: string;
   detail: string;
   dueAt?: string | null;
+  dueStatus?: DashboardDueStatus;
   sourceType?: string | null;
   sourceId?: string | null;
   persistent?: boolean;
+  actions?: {
+    canClaim?: boolean;
+    canComplete?: boolean;
+    canTransfer?: boolean;
+    canCancel?: boolean;
+    canComment?: boolean;
+    canViewEvents?: boolean;
+  };
 }
 
 export interface DashboardReviewItem {
@@ -234,7 +245,17 @@ export interface DashboardReviewItem {
   targetId?: string;
   decision?: string | null;
   comment?: string | null;
+  dueAt?: string | null;
+  dueStatus?: DashboardDueStatus;
   persistent?: boolean;
+  actions?: {
+    canAssign?: boolean;
+    canApprove?: boolean;
+    canReject?: boolean;
+    canComment?: boolean;
+    canCountersign?: boolean;
+    canViewEvents?: boolean;
+  };
 }
 
 export interface DashboardTask {

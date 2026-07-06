@@ -166,6 +166,19 @@ function eventActionLabel(action: string) {
   return labels[action] ?? action;
 }
 
+function dueLabel(dueStatus?: string, dueAt?: string | null) {
+  if (!dueAt || dueStatus === "none") return "";
+  const prefix = dueStatus === "overdue" ? "已逾期" : dueStatus === "due_soon" ? "即将到期" : "截止";
+  return `${prefix} ${formatTime(dueAt)}`;
+}
+
+function dueType(dueStatus?: string) {
+  if (dueStatus === "overdue") return "danger";
+  if (dueStatus === "due_soon") return "warning";
+  if (dueStatus === "normal") return "info";
+  return "info";
+}
+
 async function showWorkItemEvents(id: string, title: string) {
   eventDialogTitle.value = `工作项记录：${title}`;
   eventDialogVisible.value = true;
@@ -355,16 +368,17 @@ watch(
               <span class="work-main">
                 <strong>{{ item.title }}</strong>
                 <small>{{ item.projectName }} · {{ item.category }} · {{ item.detail }}</small>
+                <el-tag v-if="dueLabel(item.dueStatus, item.dueAt)" :type="dueType(item.dueStatus)" effect="plain" size="small">{{ dueLabel(item.dueStatus, item.dueAt) }}</el-tag>
               </span>
               <span class="work-owner">{{ item.assigneeName || item.owner }}</span>
               <el-tag :type="statusType(item.status)" effect="plain" size="small">{{ item.status }}</el-tag>
               <span class="work-actions">
-                <el-button v-if="item.status !== '处理中'" link type="primary" @click.stop="store.claimDashboardWorkItem(item.id)">领取</el-button>
-                <el-button link type="info" @click.stop="commentWorkItem(item.id)">意见</el-button>
-                <el-button link type="primary" @click.stop="transferWorkItemAction(item.id)">转交</el-button>
-                <el-button link type="success" @click.stop="store.completeDashboardWorkItem(item.id)">完成</el-button>
-                <el-button link type="warning" @click.stop="cancelWorkItem(item.id)">取消</el-button>
-                <el-button link type="info" @click.stop="showWorkItemEvents(item.id, item.title)">记录</el-button>
+                <el-button v-if="item.actions?.canClaim" link type="primary" @click.stop="store.claimDashboardWorkItem(item.id)">领取</el-button>
+                <el-button v-if="item.actions?.canComment" link type="info" @click.stop="commentWorkItem(item.id)">意见</el-button>
+                <el-button v-if="item.actions?.canTransfer" link type="primary" @click.stop="transferWorkItemAction(item.id)">转交</el-button>
+                <el-button v-if="item.actions?.canComplete" link type="success" @click.stop="store.completeDashboardWorkItem(item.id)">完成</el-button>
+                <el-button v-if="item.actions?.canCancel" link type="warning" @click.stop="cancelWorkItem(item.id)">取消</el-button>
+                <el-button v-if="item.actions?.canViewEvents !== false" link type="info" @click.stop="showWorkItemEvents(item.id, item.title)">记录</el-button>
               </span>
               <el-icon><Right /></el-icon>
             </button>
@@ -383,16 +397,17 @@ watch(
               <span class="work-main">
                 <strong>{{ item.title }}</strong>
                 <small>{{ item.projectName }} · {{ item.type }} · {{ item.description }}</small>
+                <el-tag v-if="dueLabel(item.dueStatus, item.dueAt)" :type="dueType(item.dueStatus)" effect="plain" size="small">{{ dueLabel(item.dueStatus, item.dueAt) }}</el-tag>
               </span>
               <span class="work-owner">{{ item.reviewerName || item.submitter }}</span>
               <el-tag type="warning" effect="plain" size="small">{{ item.status }}</el-tag>
               <span class="work-actions">
-                <el-button link type="primary" @click.stop="assignReviewTask(item.id)">分配</el-button>
-                <el-button link type="info" @click.stop="commentReviewTask(item.id)">意见</el-button>
-                <el-button link type="success" @click.stop="store.approveDashboardReviewTask(item.id)">通过</el-button>
-                <el-button link type="warning" @click.stop="store.rejectDashboardReviewTask(item.id)">退回</el-button>
-                <el-button link type="primary" @click.stop="countersignReviewTask(item.id)">会签</el-button>
-                <el-button link type="info" @click.stop="showReviewTaskEvents(item.id, item.title)">记录</el-button>
+                <el-button v-if="item.actions?.canAssign" link type="primary" @click.stop="assignReviewTask(item.id)">分配</el-button>
+                <el-button v-if="item.actions?.canComment" link type="info" @click.stop="commentReviewTask(item.id)">意见</el-button>
+                <el-button v-if="item.actions?.canApprove" link type="success" @click.stop="store.approveDashboardReviewTask(item.id)">通过</el-button>
+                <el-button v-if="item.actions?.canReject" link type="warning" @click.stop="store.rejectDashboardReviewTask(item.id)">退回</el-button>
+                <el-button v-if="item.actions?.canCountersign" link type="primary" @click.stop="countersignReviewTask(item.id)">会签</el-button>
+                <el-button v-if="item.actions?.canViewEvents !== false" link type="info" @click.stop="showReviewTaskEvents(item.id, item.title)">记录</el-button>
               </span>
               <el-icon><Right /></el-icon>
             </button>

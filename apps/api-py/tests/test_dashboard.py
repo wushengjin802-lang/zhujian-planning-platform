@@ -118,6 +118,17 @@ class DashboardAggregationTest(unittest.TestCase):
         self.assertTrue(result["capabilities"]["workItemComments"])
         self.assertTrue(result["capabilities"]["taskStageEvents"])
         self.assertTrue(any(item.get("persistent") for item in result["workItems"]))
+        first_work_item = result["workItems"][0]
+        self.assertIn("dueStatus", first_work_item)
+        self.assertIn("actions", first_work_item)
+        self.assertIn("canViewEvents", first_work_item["actions"])
+        first_review_task = result["reviewQueue"][0]
+        self.assertIn("dueStatus", first_review_task)
+        self.assertIn("actions", first_review_task)
+        self.assertIn("canViewEvents", first_review_task["actions"])
+        self.assertTrue(result["capabilities"]["rowActionPermissions"])
+        self.assertTrue(result["capabilities"]["workbenchSlaHints"])
+        self.assertTrue(result["capabilities"]["stuckTaskAuditEvents"])
         self.assertEqual(result["latestEvents"][0]["action"], "comment")
         self.assertEqual(result["taskEvents"][0]["stage"], "提交解析")
         blocker_metric = next(item for item in result["metrics"] if item["key"] == "blockingIssues")

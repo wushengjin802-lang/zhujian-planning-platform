@@ -146,5 +146,20 @@ apps/api-py/alembic/versions/20260706_0004_workbench_boundary_models.py
 更新后的功能完成度 Checklist 已放入：
 
 ```text
-docs/00_project/住建平台功能完成度Checklist_v1.2_20260706.xlsx
+docs/00_project/住建平台功能完成度Checklist_v1.4_20260706.xlsx
 ```
+
+
+## v1.3 / v1.4 工作台版本号说明（2026-07-06）
+
+根据后续版本顺延要求，上一轮“工作台边界内继续完善”按 v1.3 归档；本轮继续开发版本号调整为 v1.4。
+
+v1.4 仍严格限定在工作台边界内，新增工作项/审核任务 SLA 提示、行级动作权限返回、前端按权限展示操作按钮、疑似卡住任务后端留痕，并更新代码包及 Checklist 命名。
+
+最新 Checklist 已放入：
+
+```text
+docs/00_project/住建平台功能完成度Checklist_v1.4_20260706.xlsx
+```
+
+详见：`docs/00_project/工作台功能v1.4边界内完善说明_20260706.md`。

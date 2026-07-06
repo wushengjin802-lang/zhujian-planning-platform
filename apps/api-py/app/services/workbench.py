@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Iterable
 
 from sqlalchemy import select
@@ -72,6 +72,62 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}-{int(time.time() * 1000)}"
 
 
+def _priority_due_at(priority: str, now: datetime | None = None) -> datetime:
+    base = now or _now()
+    days = {"P0": 1, "P1": 3, "P2": 7, "P3": 14}.get(priority, 7)
+    return base + timedelta(days=days)
+
+
+def _due_status(due_at: datetime | None, status: str) -> str:
+    if not due_at or status in {"已完成", "已取消", "已通过", "已退回"}:
+        return "none"
+    now = _now()
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=timezone.utc)
+    seconds = (due_at - now).total_seconds()
+    if seconds < 0:
+        return "overdue"
+    if seconds <= 24 * 3600:
+        return "due_soon"
+    return "normal"
+
+
+def _work_item_actions(item: WorkItem, user: dict[str, Any] | None) -> dict[str, bool]:
+    if not user:
+        return {"canClaim": True, "canComplete": True, "canTransfer": True, "canCancel": True, "canComment": True, "canViewEvents": True}
+    is_manager = is_management_role(user.get("role"))
+    is_assignee = bool(item.assignee_id and item.assignee_id == user.get("id"))
+    is_open = item.status in ACTIVE_WORK_STATUSES
+    can_claim = is_open and not item.assignee_id
+    can_operate = is_open and (is_manager or is_assignee)
+    return {
+        "canClaim": can_claim,
+        "canComplete": can_operate,
+        "canTransfer": can_operate,
+        "canCancel": can_operate,
+        "canComment": is_open,
+        "canViewEvents": True,
+    }
+
+
+def _review_task_actions(task: ReviewTask, user: dict[str, Any] | None) -> dict[str, bool]:
+    if not user:
+        return {"canAssign": True, "canApprove": True, "canReject": True, "canComment": True, "canCountersign": True, "canViewEvents": True}
+    is_manager = is_management_role(user.get("role"))
+    is_reviewer = bool(task.reviewer_id and task.reviewer_id == user.get("id"))
+    is_open = task.status in ACTIVE_REVIEW_STATUSES
+    can_assign = is_open and (is_manager or not task.reviewer_id)
+    can_decide = is_open and (is_manager or is_reviewer)
+    return {
+        "canAssign": can_assign,
+        "canApprove": can_decide,
+        "canReject": can_decide,
+        "canComment": is_open,
+        "canCountersign": is_open,
+        "canViewEvents": True,
+    }
+
+
 def _find_work_item(db: Session, source_type: str, source_id: str) -> WorkItem | None:
     fake_rows = getattr(db, "rows_by_model", None)
     if fake_rows is not None:
@@ -114,7 +170,7 @@ def _upsert_work_item(db: Session, *, source_type: str, source_id: str, project_
             status="待处理",
             owner=owner,
             assignee_id=None,
-            due_at=None,
+            due_at=_priority_due_at(priority),
             route=route,
             created_by=created_by,
         )
@@ -125,6 +181,8 @@ def _upsert_work_item(db: Session, *, source_type: str, source_id: str, project_
         item.title = title
         item.detail = detail
         item.priority = priority
+        if not item.due_at:
+            item.due_at = _priority_due_at(priority)
         item.owner = owner
         item.route = route
         item.updated_at = _now()
@@ -148,7 +206,7 @@ def _upsert_review_task(db: Session, *, target_type: str, target_id: str, projec
             submitter=submitter,
             reviewer_id=None,
             route=route,
-            due_at=None,
+            due_at=_priority_due_at(priority),
             decision=None,
             comment=None,
             decided_at=None,
@@ -159,6 +217,8 @@ def _upsert_review_task(db: Session, *, target_type: str, target_id: str, projec
         task.title = title
         task.description = description
         task.priority = priority
+        if not task.due_at:
+            task.due_at = _priority_due_at(priority)
         task.submitter = submitter
         task.route = route
         task.updated_at = _now()
@@ -311,7 +371,7 @@ def ensure_workbench_state(
             )
 
 
-def map_work_item(item: WorkItem, project_by_id: dict[str, Project], users_by_id: dict[str, AppUser] | None = None) -> dict[str, Any]:
+def map_work_item(item: WorkItem, project_by_id: dict[str, Project], users_by_id: dict[str, AppUser] | None = None, user: dict[str, Any] | None = None) -> dict[str, Any]:
     project = project_by_id.get(item.project_id or "")
     assignee = users_by_id.get(item.assignee_id or "") if users_by_id else None
     return {
@@ -328,13 +388,15 @@ def map_work_item(item: WorkItem, project_by_id: dict[str, Project], users_by_id
         "route": item.route,
         "detail": item.detail,
         "dueAt": item.due_at.isoformat() if item.due_at else None,
+        "dueStatus": _due_status(item.due_at, item.status),
         "sourceType": item.source_type,
         "sourceId": item.source_id,
         "persistent": True,
+        "actions": _work_item_actions(item, user),
     }
 
 
-def map_review_task(task: ReviewTask, project_by_id: dict[str, Project], users_by_id: dict[str, AppUser] | None = None) -> dict[str, Any]:
+def map_review_task(task: ReviewTask, project_by_id: dict[str, Project], users_by_id: dict[str, AppUser] | None = None, user: dict[str, Any] | None = None) -> dict[str, Any]:
     project = project_by_id.get(task.project_id or "")
     reviewer = users_by_id.get(task.reviewer_id or "") if users_by_id else None
     return {
@@ -354,7 +416,10 @@ def map_review_task(task: ReviewTask, project_by_id: dict[str, Project], users_b
         "targetId": task.target_id,
         "decision": task.decision,
         "comment": task.comment,
+        "dueAt": task.due_at.isoformat() if task.due_at else None,
+        "dueStatus": _due_status(task.due_at, task.status),
         "persistent": True,
+        "actions": _review_task_actions(task, user),
     }
 
 

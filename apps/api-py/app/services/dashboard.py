@@ -27,6 +27,7 @@ from app.db.models import (
 from app.services.workbench import (
     ACTIVE_REVIEW_STATUSES,
     ACTIVE_WORK_STATUSES,
+    add_task_event,
     apply_project_visibility,
     ensure_workbench_state,
     is_management_role,
@@ -87,6 +88,43 @@ def _is_stuck(status: str, updated_at: datetime | None, threshold_minutes: int =
         return False
     now = datetime.now(updated_at.tzinfo or timezone.utc)
     return (now - updated_at).total_seconds() > threshold_minutes * 60
+
+
+def _has_task_event(db: Session, task_kind: str, task_id: str, stage: str) -> bool:
+    fake_rows = getattr(db, "rows_by_model", None)
+    if fake_rows is not None:
+        return any(
+            item.task_kind == task_kind and item.task_id == task_id and item.stage == stage
+            for item in fake_rows.get(TaskEvent, [])
+        )
+    return bool(
+        db.scalar(
+            select(TaskEvent).where(
+                TaskEvent.task_kind == task_kind,
+                TaskEvent.task_id == task_id,
+                TaskEvent.stage == stage,
+            )
+        )
+    )
+
+
+def _record_stuck_task_events(db: Session, tasks: list[dict[str, Any]], user: dict[str, Any]) -> None:
+    for task in tasks:
+        if not task.get("stuck"):
+            continue
+        if _has_task_event(db, task["taskKind"], task["id"], "stuck_detected"):
+            continue
+        add_task_event(
+            db,
+            project_id=task.get("projectId"),
+            task_kind=task["taskKind"],
+            task_id=task["id"],
+            status=task.get("rawStatus") or task.get("status") or "stuck",
+            stage="stuck_detected",
+            message="工作台检测到任务长时间无进度，建议取消或重试。",
+            actor=user,
+            payload={"updatedAt": task.get("updatedAt"), "taskName": task.get("name")},
+        )
 
 
 def _iso(value: datetime | str | None) -> str | None:
@@ -185,9 +223,9 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
     review_rows = db.scalars(review_stmt.order_by(ReviewTask.priority, ReviewTask.updated_at.desc()).limit(30)).all()
     note_rows = db.scalars(notification_stmt.order_by(Notification.created_at.desc()).limit(20)).all()
 
-    work_items = [map_work_item(item, project_by_id, users_by_id) for item in work_items_rows]
+    work_items = [map_work_item(item, project_by_id, users_by_id, user) for item in work_items_rows]
     work_items.sort(key=lambda item: (PRIORITY_ORDER.get(item["priority"], 9), item["category"], item["title"]))
-    review_queue = [map_review_task(item, project_by_id, users_by_id) for item in review_rows]
+    review_queue = [map_review_task(item, project_by_id, users_by_id, user) for item in review_rows]
     review_queue.sort(key=lambda item: PRIORITY_ORDER.get(item["priority"], 9))
 
     document_by_id = {document.id: document for document in documents}
@@ -289,6 +327,9 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
     running_tasks = [task for task in tasks if task["status"] in {"排队中", "运行中"}]
     failed_tasks = [task for task in tasks if task["status"] == "失败"]
     stuck_tasks = [task for task in tasks if task.get("stuck")]
+    if stuck_tasks:
+        _record_stuck_task_events(db, stuck_tasks, user)
+        db.commit()
 
     avg_project_progress = round(sum(project.progress for project in scoped_projects) / len(scoped_projects)) if scoped_projects else 0
     metrics = [
@@ -415,6 +456,33 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
         )
 
     notifications = [map_notification(item) for item in note_rows]
+    overdue_work = [item for item in work_items if item.get("dueStatus") == "overdue"]
+    due_soon_work = [item for item in work_items if item.get("dueStatus") == "due_soon"]
+    overdue_review = [item for item in review_queue if item.get("dueStatus") == "overdue"]
+    if overdue_work or overdue_review:
+        notifications.insert(
+            0,
+            {
+                "id": "overdue-workbench-items",
+                "level": "danger",
+                "title": f"有 {len(overdue_work) + len(overdue_review)} 个工作台事项已逾期",
+                "message": "请优先处理逾期待办和审核任务。",
+                "route": "/dashboard",
+                "status": "未读",
+            },
+        )
+    elif due_soon_work:
+        notifications.insert(
+            0,
+            {
+                "id": "due-soon-workbench-items",
+                "level": "warning",
+                "title": f"有 {len(due_soon_work)} 个待办即将到期",
+                "message": "请在24小时内完成或转交。",
+                "route": "/dashboard",
+                "status": "未读",
+            },
+        )
     if stuck_tasks:
         notifications.insert(
             0,
@@ -498,5 +566,8 @@ def build_dashboard(db: Session, user: dict[str, Any], project_id: str | None = 
             "reviewCountersign": True,
             "notificationBatchRead": True,
             "taskStageEvents": True,
+            "rowActionPermissions": True,
+            "workbenchSlaHints": True,
+            "stuckTaskAuditEvents": True,
         },
     }
