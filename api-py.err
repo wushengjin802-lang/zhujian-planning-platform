@@ -1,0 +1,6 @@
+INFO:     Will watch for changes in these directories: ['D:\\12_其他项目\\27_FreeCAD\\方案设计\\zhujian-planning-platform\\apps\\api-py']
+INFO:     Uvicorn running on http://0.0.0.0:8787 (Press CTRL+C to quit)
+INFO:     Started reloader process [21456] using WatchFiles
+INFO:     Started server process [29564]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
